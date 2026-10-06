@@ -406,7 +406,7 @@ export default function DashboardTab({
         <SettingRow
           icon={<FolderCog size={16} />}
           title="ffmpeg 路径"
-          description="ffmpeg 可执行文件/命令，可指向 ffmpeg-over-ip client（绝对路径）。"
+          description="ffmpeg 可执行文件/命令。可指向任意 ffmpeg 兼容的可执行文件（例如你自行挂载的远程转码客户端），由你自行提供，本系统不做专门集成。"
         >
           <Input
             value={sysSettings.ffmpeg_path}
@@ -418,51 +418,13 @@ export default function DashboardTab({
         <SettingRow
           icon={<FolderCog size={16} />}
           title="ffprobe 路径"
-          description="ffprobe 可执行文件/命令（同 client 的 ffprobe 软链）。"
+          description="ffprobe 可执行文件/命令。可指向任意 ffprobe 兼容可执行文件，由你自行提供，本系统不做专门集成。"
         >
           <Input
             value={sysSettings.ffprobe_path}
             onChange={(event) => setSysSettings((s) => ({ ...s, ffprobe_path: event.target.value }))}
             placeholder="ffprobe"
           />
-        </SettingRow>
-
-        <SettingRow
-          icon={<Link size={16} />}
-          title="ffmpeg-over-ip"
-          description="把 ffmpeg/ffprobe 视为 ffoip client，启动子进程时注入地址与密钥。"
-          control={(
-            <ToggleButton
-              checked={sysSettings.ffoip_enabled}
-              onChange={() => setSysSettings((s) => ({ ...s, ffoip_enabled: !s.ffoip_enabled }))}
-            />
-          )}
-        >
-          {sysSettings.ffoip_enabled && (
-            <div className="space-y-3 rounded-[var(--nv-radius-control)] border border-[var(--nv-border-subtle)] bg-[var(--nv-bg-surface-soft)] p-3">
-              <div>
-                <label className="mb-1.5 block text-xs font-medium text-[var(--nv-text-tertiary)]">Server 地址（host:port）</label>
-                <Input
-                  value={sysSettings.ffoip_server_address}
-                  onChange={(event) => setSysSettings((s) => ({ ...s, ffoip_server_address: event.target.value }))}
-                  placeholder="192.168.1.10:5050"
-                />
-              </div>
-              <div>
-                <label className="mb-1.5 block text-xs font-medium text-[var(--nv-text-tertiary)]">密钥（HMAC-SHA256）</label>
-                <Input
-                  type="password"
-                  value={sysSettings.ffoip_auth_secret}
-                  onChange={(event) => setSysSettings((s) => ({ ...s, ffoip_auth_secret: event.target.value }))}
-                  placeholder={sysSettings.ffoip_auth_secret === '__SET__' ? '已设置（保存新值以覆盖）' : '输入 ffoip client 鉴权密钥'}
-                  autoComplete="new-password"
-                />
-                {sysSettings.ffoip_auth_secret === '__SET__' && (
-                  <p className="mt-1 text-[11px] text-[var(--nv-text-faint)]">服务端已保存密钥，此处为脱敏显示；留空保存不会清除。</p>
-                )}
-              </div>
-            </div>
-          )}
         </SettingRow>
 
         <div className="grid gap-4 py-5 sm:grid-cols-3">

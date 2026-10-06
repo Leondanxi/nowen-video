@@ -785,21 +785,15 @@ export interface SystemSettings {
   auto_transcode_on_play: boolean    // 播放时自动触发转码
   prefer_direct_play: boolean        // 优先直接播放（禁用自动转码）
 
-  // ---- 硬件解码 / ffmpeg 入口 / ffmpeg-over-ip（§3.1） ----
+  // ---- 硬件解码 / ffmpeg 入口（§3.1） ----
   /** 解码/加速总模式 auto/software/hardware，默认 auto */
   hw_decode_mode: HwDecodeMode
   /** 硬件 API：auto/nvenc/qsv/vaapi/amf，默认 auto */
   hw_encoder: HwEncoder
-  /** ffmpeg 可执行文件/命令（可指向 ffoip client） */
+  /** ffmpeg 可执行文件/命令（可指向任意 ffmpeg 兼容可执行文件，由部署方自行提供） */
   ffmpeg_path: string
-  /** ffprobe 可执行文件/命令（同 client 的 ffprobe 软链） */
+  /** ffprobe 可执行文件/命令 */
   ffprobe_path: string
-  /** 视 ffmpeg 为 ffoip client，注入 ffoip 环境 */
-  ffoip_enabled: boolean
-  /** ffoip server host:port，映射 FFMPEG_OVER_IP_CLIENT_ADDRESS */
-  ffoip_server_address: string
-  /** ffoip 密钥（敏感）；GET 脱敏为 "__SET__"，绝不回传明文 */
-  ffoip_auth_secret: string
   /** 最大并发转码会话 */
   transcode_max_sessions: number
   /** HLS 分段时长（秒） */

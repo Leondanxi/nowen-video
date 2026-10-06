@@ -53,6 +53,8 @@ type SubtitlePreprocessService struct {
 	scanner    *ScannerService
 	logger     *zap.SugaredLogger
 	wsHub      *WSHub
+	// systemSettingRepo 用于解析 ffmpeg/ffprobe 热设置路径（可选，延迟注入）。
+	systemSettingRepo *repository.SystemSettingRepo
 
 	// 工作协程控制
 	workerCount int32
@@ -117,19 +119,18 @@ func (s *SubtitlePreprocessService) SetWSHub(hub *WSHub) {
 	s.wsHub = hub
 }
 
-// ffmpegBin / ffprobeBin 取配置中的可执行路径（§3.1）；未配置时回退 PATH 同名命令。
+// SetSystemSettingRepo 注入系统设置仓储（延迟注入），用于解析 ffmpeg/ffprobe 热路径。
+func (s *SubtitlePreprocessService) SetSystemSettingRepo(repo *repository.SystemSettingRepo) {
+	s.systemSettingRepo = repo
+}
+
+// ffmpegBin / ffprobeBin 统一走解析入口（热设置 > 环境变量 > Viper/cfg，§B）。
 func (s *SubtitlePreprocessService) ffmpegBin() string {
-	if s.cfg != nil && strings.TrimSpace(s.cfg.App.FFmpegPath) != "" {
-		return strings.TrimSpace(s.cfg.App.FFmpegPath)
-	}
-	return "ffmpeg"
+	return ResolveFFmpegPath(s.systemSettingRepo, s.cfg)
 }
 
 func (s *SubtitlePreprocessService) ffprobeBin() string {
-	if s.cfg != nil && strings.TrimSpace(s.cfg.App.FFprobePath) != "" {
-		return strings.TrimSpace(s.cfg.App.FFprobePath)
-	}
-	return "ffprobe"
+	return ResolveFFprobePath(s.systemSettingRepo, s.cfg)
 }
 
 // ==================== 公开 API ====================

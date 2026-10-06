@@ -8,14 +8,14 @@ import (
 
 func TestNumericOriginalSoftwareOmitsScaleAndUsesCRF(t *testing.T) {
 	args := BuildRollingHLSArgs(BuildOptions{
-		InputPath:            "in.mkv",
-		OutputDir:            t.TempDir(),
-		HWAccel:              HWAccelNone,
-		Profile:              Profile{Width: 0, Height: 0, AudioBitrate: "128k"},
+		InputPath:             "in.mkv",
+		OutputDir:             t.TempDir(),
+		HWAccel:               HWAccelNone,
+		Profile:               Profile{Width: 0, Height: 0, AudioBitrate: "128k"},
 		UseNumericRateControl: true,
 		NumericBitrateKbps:    0,
 		EffectiveCRF:          18,
-		HLSTime:              2,
+		HLSTime:               2,
 	}, RollingHLSOptions{ListSize: 30, DeleteThreshold: 10, SegmentPattern: "seg_%06d.ts"})
 
 	require.Contains(t, args, "libx264")

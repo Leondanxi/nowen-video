@@ -91,8 +91,8 @@ func (h *PlaybackPlanHandler) QualityPresets(c *gin.Context) {
 		})
 	}
 	c.JSON(http.StatusOK, gin.H{"data": gin.H{
-		"default":  h.stream.DefaultQualityPreset(),
-		"presets":  presets,
+		"default": h.stream.DefaultQualityPreset(),
+		"presets": presets,
 	}})
 }
 

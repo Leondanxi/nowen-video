@@ -3,44 +3,46 @@ package service
 import (
 	"os"
 	"strconv"
+	"strings"
 
+	"github.com/nowen-video/nowen-video/internal/config"
 	"github.com/nowen-video/nowen-video/internal/repository"
 )
 
 // 转码相关热设置键（冻结规格 §3.1）。DB SystemSetting KV，保存即生效。
 // 与 internal/handler/admin_system.go 的 GET/PUT /settings/system 共用同一份 key。
 const (
-	SettingKeyHWDecodeMode       = "hw_decode_mode"
-	SettingKeyHWEncoder          = "hw_encoder"
-	SettingKeyGPUFallbackCPU     = "gpu_fallback_cpu"
-	SettingKeyFFmpegPath         = "ffmpeg_path"
-	SettingKeyFFprobePath        = "ffprobe_path"
-	SettingKeyFFOIPEnabled       = "ffoip_enabled"
-	SettingKeyFFOIPServerAddress = "ffoip_server_address"
-	SettingKeyFFOIPAuthSecret    = "ffoip_auth_secret"
-	SettingKeyTranscodeMaxSess   = "transcode_max_sessions"
-	SettingKeyTranscodeSegDur    = "transcode_segment_duration"
-	SettingKeyTranscodeCRF       = "transcode_crf"
-	SettingKeyBrowserHEVC        = "browser_hevc"
-	SettingKeyQualityPresets     = "quality_presets"
-	SettingKeyDefaultQuality     = "default_quality_preset"
-
-	// ffoip 子进程环境变量名（§1/§9，精确名）。
-	envFFOIPClientAddress = "FFMPEG_OVER_IP_CLIENT_ADDRESS"
-	envFFOIPAuthSecret    = "FFMPEG_OVER_IP_CLIENT_AUTH_SECRET"
-	envFFOIPClientLog     = "FFMPEG_OVER_IP_CLIENT_LOG"
+	SettingKeyHWDecodeMode     = "hw_decode_mode"
+	SettingKeyHWEncoder        = "hw_encoder"
+	SettingKeyGPUFallbackCPU   = "gpu_fallback_cpu"
+	SettingKeyFFmpegPath       = "ffmpeg_path"
+	SettingKeyFFprobePath      = "ffprobe_path"
+	SettingKeyTranscodeMaxSess = "transcode_max_sessions"
+	SettingKeyTranscodeSegDur  = "transcode_segment_duration"
+	SettingKeyTranscodeCRF     = "transcode_crf"
+	SettingKeyBrowserHEVC      = "browser_hevc"
+	SettingKeyQualityPresets   = "quality_presets"
+	SettingKeyDefaultQuality   = "default_quality_preset"
 )
 
-// 默认值（§3.1）。
+// 用户容器环境变量覆盖名（需求 B，固定名）。优先级：热设置(DB) > 这些 env > Viper/默认。
 const (
-	defaultHWDecodeMode       = "auto"
-	defaultHWEncoder          = "auto"
-	defaultGPUFallbackCPU     = false
-	defaultTranscodeMaxSess   = 6
-	defaultTranscodeSegDur    = 6
-	defaultTranscodeCRF       = 18
-	defaultBrowserHEVC        = true
-	defaultQualityPresetName  = "auto"
+	EnvOverrideFFmpegPath   = "NOWEN_APP_FFMPEG_PATH"
+	EnvOverrideFFprobePath  = "NOWEN_APP_FFPROBE_PATH"
+	EnvOverrideHWDecodeMode = "NOWEN_TRANSCODE_HW_DECODE_MODE"
+	EnvOverrideHWEncoder    = "NOWEN_TRANSCODE_HW_ENCODER"
+)
+
+// 默认值。
+const (
+	defaultHWDecodeMode      = "auto"
+	defaultHWEncoder         = "auto"
+	defaultGPUFallbackCPU    = false
+	defaultTranscodeMaxSess  = 6
+	defaultTranscodeSegDur   = 6
+	defaultTranscodeCRF      = 18
+	defaultBrowserHEVC       = true
+	defaultQualityPresetName = "auto"
 )
 
 func settingStr(repo *repository.SystemSettingRepo, key, def string) string {
@@ -80,25 +82,54 @@ func settingInt(repo *repository.SystemSettingRepo, key string, def int) int {
 	return n
 }
 
-// buildFFOIPEnv 按 ffoip_enabled 构造注入给 ffmpeg/ffprobe 子进程的环境变量（§9）。
-// 未启用或地址为空时返回 nil。
-func buildFFOIPEnv(repo *repository.SystemSettingRepo) []string {
-	if !settingBool(repo, SettingKeyFFOIPEnabled, false) {
-		return nil
+// ResolveFFmpegPath 解析 ffmpeg 可执行路径，优先级：热设置(DB ffmpeg_path) >
+// 环境变量 NOWEN_APP_FFMPEG_PATH > Viper/cfg.App.FFmpegPath > 默认 "ffmpeg"。
+// 所有 ffmpeg 调用统一走此入口。
+func ResolveFFmpegPath(repo *repository.SystemSettingRepo, cfg *config.Config) string {
+	if v := strings.TrimSpace(settingStr(repo, SettingKeyFFmpegPath, "")); v != "" {
+		return v
 	}
-	address := settingStr(repo, SettingKeyFFOIPServerAddress, "")
-	if address == "" {
-		return nil
+	if v := strings.TrimSpace(os.Getenv(EnvOverrideFFmpegPath)); v != "" {
+		return v
 	}
-	env := []string{
-		envFFOIPClientAddress + "=" + address,
+	if cfg != nil && strings.TrimSpace(cfg.App.FFmpegPath) != "" {
+		return cfg.App.FFmpegPath
 	}
-	if secret := settingStr(repo, SettingKeyFFOIPAuthSecret, ""); secret != "" {
-		env = append(env, envFFOIPAuthSecret+"="+secret)
+	return "ffmpeg"
+}
+
+// ResolveFFprobePath 同理，对应 NOWEN_APP_FFPROBE_PATH。
+func ResolveFFprobePath(repo *repository.SystemSettingRepo, cfg *config.Config) string {
+	if v := strings.TrimSpace(settingStr(repo, SettingKeyFFprobePath, "")); v != "" {
+		return v
 	}
-	// 可选日志：透传当前进程的 FFOIP log 开关（若有），便于排障。
-	if lvl := os.Getenv("FFMPEG_OVER_IP_CLIENT_LOG"); lvl != "" {
-		env = append(env, envFFOIPClientLog+"="+lvl)
+	if v := strings.TrimSpace(os.Getenv(EnvOverrideFFprobePath)); v != "" {
+		return v
 	}
-	return env
+	if cfg != nil && strings.TrimSpace(cfg.App.FFprobePath) != "" {
+		return cfg.App.FFprobePath
+	}
+	return "ffprobe"
+}
+
+// resolveHWDecodeMode 解析解码模式：热设置 > 环境变量 NOWEN_TRANSCODE_HW_DECODE_MODE > 默认 auto。
+func resolveHWDecodeMode(repo *repository.SystemSettingRepo) string {
+	if v := strings.TrimSpace(settingStr(repo, SettingKeyHWDecodeMode, "")); v != "" {
+		return v
+	}
+	if v := strings.TrimSpace(os.Getenv(EnvOverrideHWDecodeMode)); v != "" {
+		return v
+	}
+	return defaultHWDecodeMode
+}
+
+// resolveHWEncoder 同理，对应 NOWEN_TRANSCODE_HW_ENCODER。
+func resolveHWEncoder(repo *repository.SystemSettingRepo) string {
+	if v := strings.TrimSpace(settingStr(repo, SettingKeyHWEncoder, "")); v != "" {
+		return v
+	}
+	if v := strings.TrimSpace(os.Getenv(EnvOverrideHWEncoder)); v != "" {
+		return v
+	}
+	return defaultHWEncoder
 }

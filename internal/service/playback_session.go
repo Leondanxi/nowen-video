@@ -122,15 +122,15 @@ func NewPlaybackSessionService(
 		return nil, err
 	}
 	runnerConfig := playbacktranscode.DefaultConfig(
-		cfg.App.FFmpegPath,
+		ResolveFFmpegPath(settingRepo, cfg),
 		execution.GetHWAccelInfo(),
 		cfg.App.VAAPIDevice,
 		ffmpeg.CalcThreads(cfg),
 	)
-	// 分段时长 / CRF / ffoip 环境来自热设置（§3.1/§9）。
+	// 分段时长 / CRF 来自热设置（§3.1）。ffmpeg 子进程不做专门 env 拼装：
+	// Command.Env 留空 → Go exec 自动继承完整父进程环境（用户容器 env 天然透传）。
 	runnerConfig.SegmentDuration = settingInt(settingRepo, SettingKeyTranscodeSegDur, defaultTranscodeSegDur)
 	runnerConfig.TranscodeCRF = settingInt(settingRepo, SettingKeyTranscodeCRF, defaultTranscodeCRF)
-	runnerConfig.FFmpegEnv = buildFFOIPEnv(settingRepo)
 	// Older VC-1/WMV inputs and cold GPU initialization can legitimately need
 	// more than four seconds before the first HLS segment appears. Keep the
 	// hardware attempt long enough to distinguish slow startup from a real
@@ -339,11 +339,12 @@ func (s *PlaybackSessionService) startGeneration(
 	})
 }
 
-// resolveBackend 按 §6 解析有效后端：显式 backend 优先；否则用设置
-// hw_decode_mode/hw_encoder 结合本地探测。DisableFallback（§8）由设置推导。
+// resolveBackend 按 §6 解析有效后端：显式 backend 优先；否则用
+// hw_decode_mode/hw_encoder（热设置 > 环境变量 > 默认）结合本地探测。
+// DisableFallback（§8）由设置推导。
 func (s *PlaybackSessionService) resolveBackend(forced string) (string, bool) {
-	hwMode := settingStr(s.settingRepo, SettingKeyHWDecodeMode, defaultHWDecodeMode)
-	hwEnc := settingStr(s.settingRepo, SettingKeyHWEncoder, defaultHWEncoder)
+	hwMode := resolveHWDecodeMode(s.settingRepo)
+	hwEnc := resolveHWEncoder(s.settingRepo)
 	detected := s.execution.GetHWAccelInfo()
 	backend := ffmpeg.ResolveBackend(hwMode, hwEnc, detected)
 	if forced = strings.TrimSpace(forced); forced != "" {

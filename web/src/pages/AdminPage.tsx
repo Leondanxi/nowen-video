@@ -223,14 +223,11 @@ export default function AdminPage() {
     auto_preprocess_on_scan: false,
     auto_transcode_on_play: false,
     prefer_direct_play: true,
-    // 硬件解码 / ffmpeg 入口 / ffmpeg-over-ip / 画质档位（§3.1 热设置默认值）
+    // 硬件解码 / ffmpeg 入口 / 画质档位（§3.1 热设置默认值）
     hw_decode_mode: 'auto',
     hw_encoder: 'auto',
     ffmpeg_path: 'ffmpeg',
     ffprobe_path: 'ffprobe',
-    ffoip_enabled: false,
-    ffoip_server_address: '',
-    ffoip_auth_secret: '',
     transcode_max_sessions: 6,
     transcode_segment_duration: 6,
     transcode_crf: 18,

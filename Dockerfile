@@ -32,30 +32,6 @@ FROM alpine:3.24
 ARG TARGETARCH
 ARG NOWEN_VERSION=0.1.0
 ARG FFMPEG_VERSION=8.1.2-r0
-# ---------------------------------------------------------------------------
-# OPTIONAL ffmpeg-over-ip client bundle (DISABLED BY DEFAULT).
-#   FFOIP_VERSION pins a GitHub release tag, e.g. v5.2.1. Leave EMPTY ("") to
-#   skip the download entirely (this is the default and the recommended route;
-#   most users should read-only bind-mount the client instead — see
-#   docs/ffmpeg-over-ip-deploy.md and docker-compose.yml).
-#
-#   When set, the static Linux client is fetched from the project's GitHub
-#   Releases:
-#     https://github.com/steelbrain/ffmpeg-over-ip/releases/download/<TAG>/linux-<arch>-ffmpeg-over-ip-client.zip
-#   where <arch> is $TARGETARCH (amd64 | arm64 — these match the release asset
-#   names exactly). It is installed at /opt/ffoip/ffmpeg, and /opt/ffoip/ffprobe
-#   is created as an argv[0] symlink to the same binary (the client switches to
-#   ffprobe mode when its basename contains "ffprobe").
-#
-#   The system ffmpeg/ffprobe installed below is left untouched so it remains a
-#   local software-encode fallback. No address/secret is baked into the image;
-#   those are injected at runtime via compose environment / .env or nowen's hot
-#   settings.
-#
-#   Build with e.g.:
-#     docker build --build-arg FFOIP_VERSION=v5.2.1 -t nowen-video:ffoip .
-# ---------------------------------------------------------------------------
-ARG FFOIP_VERSION=""
 
 # Keep the runtime dependency surface minimal. Alpine's BusyBox already
 # provides the health-check client and standard process utilities we need.
@@ -76,30 +52,6 @@ RUN set -eux; \
       apk add --no-cache intel-media-driver libva-intel-driver mesa-va-gallium; \
     else \
       apk add --no-cache mesa-va-gallium; \
-    fi
-
-# Optional ffmpeg-over-ip client bundle. This whole stage is a no-op unless you
-# pass --build-arg FFOIP_VERSION=<tag>; it adds ~1.2 MB and does NOT remove the
-# system ffmpeg installed above. Asset layout is tolerant of a flat vs. wrapper
-# zip. See the ARG declaration above and docs/ffmpeg-over-ip-deploy.md.
-RUN set -eux; \
-    if [ -n "${FFOIP_VERSION}" ]; then \
-      apk add --no-cache curl unzip; \
-      mkdir -p /opt/ffoip; \
-      echo "Bundling ffmpeg-over-ip client ${FFOIP_VERSION} for linux-${TARGETARCH}"; \
-      curl -fsSL -o /tmp/ffoip.zip \
-        "https://github.com/steelbrain/ffmpeg-over-ip/releases/download/${FFOIP_VERSION}/linux-${TARGETARCH}-ffmpeg-over-ip-client.zip"; \
-      tmp="$(mktemp -d)"; \
-      unzip -o -q /tmp/ffoip.zip -d "${tmp}"; \
-      bin="$(find "${tmp}" -type f \( -name 'ffmpeg-over-ip-client*' -o -name 'ffmpeg-over-ip' \) | head -n1)"; \
-      [ -n "${bin}" ] || { echo "ffmpeg-over-ip client binary not found in release zip" >&2; exit 1; }; \
-      install -m 0755 "${bin}" /opt/ffoip/ffmpeg; \
-      ln -sf ffmpeg /opt/ffoip/ffprobe; \
-      chmod -R a+rX /opt/ffoip; \
-      rm -rf /tmp/ffoip.zip "${tmp}"; \
-      ls -l /opt/ffoip; \
-    else \
-      echo "FFOIP_VERSION not set -> skipping ffmpeg-over-ip client bundle (system ffmpeg remains the only ffmpeg)."; \
     fi
 
 RUN addgroup -S nowen && adduser -S nowen -G nowen

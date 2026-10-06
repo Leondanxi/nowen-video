@@ -51,8 +51,6 @@ type Config struct {
 	// TranscodeCRF 是全局 x264 CRF / 恒定质量基准（§3.1 transcode_crf，默认 18）。
 	// 每档 Preset.CRF>0 时优先用档位值。
 	TranscodeCRF int
-	// FFmpegEnv 追加到每次转码子进程环境（ffmpeg-over-ip，§9）。
-	FFmpegEnv []string
 }
 
 func DefaultConfig(ffmpegPath, hwAccel, vaapiDevice string, threads int) Config {
@@ -100,8 +98,6 @@ type StartRequest struct {
 	DisableFallback bool
 	// SourceIsAV1 标记源视频编码为 AV1；硬件后端下去掉硬解预参、绝不生成 AV1 硬参（§7）。
 	SourceIsAV1 bool
-	// Env 追加到转码子进程环境（ffmpeg-over-ip 注入，§9）。
-	Env []string
 }
 
 type ReadyResult struct {
@@ -319,7 +315,6 @@ func (r *Runner) run(runtimeView playbacksession.GenerationRuntime, request Star
 		finalResult = r.runtime.Run(attemptCtx, kind, transcodeexecutor.Command{
 			Path:       r.cfg.FFmpegPath,
 			Args:       args,
-			Env:        buildCommandEnv(r.cfg.FFmpegEnv, request.Env),
 			StderrTail: 80,
 		}, transcodeexecutor.Callbacks{
 			OnStarted: func(process *os.Process) {
@@ -371,7 +366,7 @@ func (r *Runner) run(runtimeView playbacksession.GenerationRuntime, request Star
 			continue
 		}
 		if backend != ffmpeg.HWAccelNone && request.DisableFallback {
-			// §8：已强制硬件、未回退 CPU —— 排障日志，便于定位远端 GPU / ffoip 问题。
+			// §8：已强制硬件、未回退 CPU —— 排障日志，便于定位远端 GPU / 硬解问题。
 			r.logger.Errorw("playback hardware startup failed; fallback to CPU is disabled (forced hardware)",
 				"session_id", request.SessionID,
 				"generation_id", request.GenerationID,
@@ -483,7 +478,7 @@ func (r *Runner) buildArgs(runtimeView playbacksession.GenerationRuntime, reques
 
 		UseNumericRateControl: true,
 		NumericBitrateKbps:    preset.BitrateKbps,
-		EffectiveCRF:           crf,
+		EffectiveCRF:          crf,
 		SourceIsAV1:           request.SourceIsAV1,
 	}, ffmpeg.RollingHLSOptions{
 		ListSize:        r.cfg.PlaylistWindow,
@@ -544,18 +539,6 @@ func resetOutputDirectory(outputDir string) error {
 		}
 	}
 	return nil
-}
-
-// buildCommandEnv 合并 runner 级（ffoip）环境与会话级追加环境，去重为空时返回 nil。
-func buildCommandEnv(extra ...[]string) []string {
-	var merged []string
-	for _, e := range extra {
-		merged = append(merged, e...)
-	}
-	if len(merged) == 0 {
-		return nil
-	}
-	return merged
 }
 
 func withMachineProgress(args []string) []string {

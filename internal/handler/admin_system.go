@@ -184,26 +184,17 @@ func (h *AdminHandler) GetSystemSettings(c *gin.Context) {
 		SettingAutoTranscode:    getBoolSetting(all, SettingAutoTranscode, false),   // 默认关闭：播放时不自动转码
 		SettingPreferDirectPlay: getBoolSetting(all, SettingPreferDirectPlay, true), // 默认开启：优先直接播放
 
-		// ===== 软/硬件解码 + ffmpeg-over-ip（冻结规格 §3.1） =====
-		service.SettingKeyHWDecodeMode:      getStrSetting(all, service.SettingKeyHWDecodeMode, "auto"),
-		service.SettingKeyHWEncoder:         getStrSetting(all, service.SettingKeyHWEncoder, "auto"),
-		service.SettingKeyGPUFallbackCPU:    getBoolSetting(all, service.SettingKeyGPUFallbackCPU, false),
-		service.SettingKeyFFmpegPath:        getStrSetting(all, service.SettingKeyFFmpegPath, "ffmpeg"),
-		service.SettingKeyFFprobePath:       getStrSetting(all, service.SettingKeyFFprobePath, "ffprobe"),
-		service.SettingKeyFFOIPEnabled:      getBoolSetting(all, service.SettingKeyFFOIPEnabled, false),
-		service.SettingKeyFFOIPServerAddress: getStrSetting(all, service.SettingKeyFFOIPServerAddress, ""),
-		service.SettingKeyTranscodeMaxSess:  getIntSetting(all, service.SettingKeyTranscodeMaxSess, 6),
-		service.SettingKeyTranscodeSegDur:   getIntSetting(all, service.SettingKeyTranscodeSegDur, 6),
-		service.SettingKeyTranscodeCRF:      getIntSetting(all, service.SettingKeyTranscodeCRF, 18),
-		service.SettingKeyBrowserHEVC:       getBoolSetting(all, service.SettingKeyBrowserHEVC, true),
+		// ===== 软/硬件解码 + 自定义 ffmpeg 路径（冻结规格 §3.1） =====
+		service.SettingKeyHWDecodeMode:     getStrSetting(all, service.SettingKeyHWDecodeMode, "auto"),
+		service.SettingKeyHWEncoder:        getStrSetting(all, service.SettingKeyHWEncoder, "auto"),
+		service.SettingKeyGPUFallbackCPU:   getBoolSetting(all, service.SettingKeyGPUFallbackCPU, false),
+		service.SettingKeyFFmpegPath:       getStrSetting(all, service.SettingKeyFFmpegPath, "ffmpeg"),
+		service.SettingKeyFFprobePath:      getStrSetting(all, service.SettingKeyFFprobePath, "ffprobe"),
+		service.SettingKeyTranscodeMaxSess: getIntSetting(all, service.SettingKeyTranscodeMaxSess, 6),
+		service.SettingKeyTranscodeSegDur:  getIntSetting(all, service.SettingKeyTranscodeSegDur, 6),
+		service.SettingKeyTranscodeCRF:     getIntSetting(all, service.SettingKeyTranscodeCRF, 18),
+		service.SettingKeyBrowserHEVC:      getBoolSetting(all, service.SettingKeyBrowserHEVC, true),
 		service.SettingKeyDefaultQuality:   getStrSetting(all, service.SettingKeyDefaultQuality, "auto"),
-	}
-
-	// ffoip_auth_secret 脱敏：未设返回 ""，已设返回 "__SET__"，绝不回传明文（§3.1）。
-	if secret := getStrSetting(all, service.SettingKeyFFOIPAuthSecret, ""); secret != "" {
-		settings[service.SettingKeyFFOIPAuthSecret] = "__SET__"
-	} else {
-		settings[service.SettingKeyFFOIPAuthSecret] = ""
 	}
 
 	// quality_presets：返回当前生效档位（覆盖或内置默认），供设置页编辑。
@@ -256,19 +247,16 @@ type UpdateSystemSettingsRequest struct {
 	AutoTranscode      *bool   `json:"auto_transcode_on_play"`
 	PreferDirectPlay   *bool   `json:"prefer_direct_play"`
 
-	// ===== 软/硬件解码 + ffmpeg-over-ip（§3.1，全部指针式部分更新） =====
-	HWDecodeMode      *string `json:"hw_decode_mode"`
-	HWEncoder         *string `json:"hw_encoder"`
-	FFmpegPath        *string `json:"ffmpeg_path"`
-	FFprobePath       *string `json:"ffprobe_path"`
-	FFOIPEnabled      *bool   `json:"ffoip_enabled"`
-	FFOIPServerAddr   *string `json:"ffoip_server_address"`
-	FFOIPAuthSecret   *string `json:"ffoip_auth_secret"` // 敏感；仅写库，不回显明文
-	TranscodeMaxSess  *int    `json:"transcode_max_sessions"`
-	TranscodeSegDur   *int    `json:"transcode_segment_duration"`
-	TranscodeCRF      *int    `json:"transcode_crf"`
-	BrowserHEVC       *bool   `json:"browser_hevc"`
-	DefaultQuality    *string `json:"default_quality_preset"`
+	// ===== 软/硬件解码 + 自定义 ffmpeg 路径（§3.1，全部指针式部分更新） =====
+	HWDecodeMode     *string `json:"hw_decode_mode"`
+	HWEncoder        *string `json:"hw_encoder"`
+	FFmpegPath       *string `json:"ffmpeg_path"`
+	FFprobePath      *string `json:"ffprobe_path"`
+	TranscodeMaxSess *int    `json:"transcode_max_sessions"`
+	TranscodeSegDur  *int    `json:"transcode_segment_duration"`
+	TranscodeCRF     *int    `json:"transcode_crf"`
+	BrowserHEVC      *bool   `json:"browser_hevc"`
+	DefaultQuality   *string `json:"default_quality_preset"`
 	// QualityPresets 指向 nil = 不更新；指向空数组 = 清空覆盖回内置；指向非空数组 = 热加载覆盖。
 	QualityPresets *[]presetDTO `json:"quality_presets"`
 }
@@ -320,16 +308,6 @@ func (h *AdminHandler) UpdateSystemSettings(c *gin.Context) {
 	if req.FFprobePath != nil {
 		kvs[service.SettingKeyFFprobePath] = strings.TrimSpace(*req.FFprobePath)
 	}
-	if req.FFOIPEnabled != nil {
-		kvs[service.SettingKeyFFOIPEnabled] = boolToStr(*req.FFOIPEnabled)
-	}
-	if req.FFOIPServerAddr != nil {
-		kvs[service.SettingKeyFFOIPServerAddress] = strings.TrimSpace(*req.FFOIPServerAddr)
-	}
-	// secret：仅在用户传入非空时更新（空串=不修改，避免误清空；清除需走专门路径）。
-	if req.FFOIPAuthSecret != nil && strings.TrimSpace(*req.FFOIPAuthSecret) != "" {
-		kvs[service.SettingKeyFFOIPAuthSecret] = strings.TrimSpace(*req.FFOIPAuthSecret)
-	}
 	if req.TranscodeMaxSess != nil {
 		kvs[service.SettingKeyTranscodeMaxSess] = strconv.Itoa(*req.TranscodeMaxSess)
 	}
@@ -352,7 +330,7 @@ func (h *AdminHandler) UpdateSystemSettings(c *gin.Context) {
 		for _, d := range *req.QualityPresets {
 			presets = append(presets, transcodeprofile.Preset{
 				Name:        d.ID,
-				DisplayName:  d.Name,
+				DisplayName: d.Name,
 				Width:       d.Width,
 				Height:      d.Height,
 				BitrateKbps: d.Bitrate,

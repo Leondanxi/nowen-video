@@ -12,7 +12,7 @@ func TestResolveBackendSoftware(t *testing.T) {
 }
 
 func TestResolveBackendHardwareForcedEncoderEvenWhenDetectionNone(t *testing.T) {
-	// §6 关键：hardware + 指定 nvenc，即使本地探测为 none（远端 GPU / ffoip）也强制。
+	// §6 关键：hardware + 指定 nvenc，即使本地探测为 none（远端 GPU）也强制。
 	require.Equal(t, HWAccelNVENC, ResolveBackend("hardware", "nvenc", "none"))
 	require.Equal(t, HWAccelQSV, ResolveBackend("hardware", "qsv", "none"))
 	require.Equal(t, HWAccelVAAPI, ResolveBackend("hardware", "vaapi", "none"))
