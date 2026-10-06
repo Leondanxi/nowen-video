@@ -1,0 +1,92 @@
+# ============================================================
+# nowen-video —— 本体部署 compose（ffmpeg 自备）
+# ------------------------------------------------------------
+# 适用：容器本身没有 GPU（例如 PVE 的 CT / Docker），ffmpeg/ffprobe
+#       由你自己安装（可以是 ffmpeg-over-ip 的 client），实际硬件
+#       编解码在远端 GPU（如直通给 Windows VM 的 RTX 2070 Super）完成。
+#
+# 用法：
+#   1. 复制本文件到部署目录；
+#   2. 按注释修改“媒体目录”和“ffmpeg/ffprobe”的宿主机路径；
+#   3. docker compose -f docker-compose.app.yml up -d --build
+#   4. 浏览器访问 http://<host>:8080，第一个注册账号自动成为管理员。
+# ============================================================
+version: '3.8'
+
+services:
+  nowen-video:
+    # 从本体 Dockerfile 构建（不含 ffmpeg/驱动）
+    build:
+      context: .
+      dockerfile: Dockerfile.slim
+    image: nowen-video:app
+    container_name: nowen-video
+    restart: unless-stopped
+
+    ports:
+      - "8080:8080"
+
+    # 容器内以 root 运行，规避挂载目录 UID/GID 不一致
+    user: "0:0"
+
+    environment:
+      - PUID=0
+      - PGID=0
+      - UMASK=000
+      - TZ=Asia/Shanghai
+
+      - NOWEN_APP_PORT=8080
+      - NOWEN_APP_DATA_DIR=/data
+      - NOWEN_APP_WEB_DIR=/app/web/dist
+      - NOWEN_DATABASE_DB_PATH=/data/nowen.db
+      - NOWEN_CACHE_CACHE_DIR=/cache
+      - NOWEN_LOGGING_LEVEL=info
+
+      # ---- 强制硬件管线（容器无 GPU 也不回退 CPU）----
+      # 解码/加速模式：auto / software / hardware
+      - NOWEN_TRANSCODE_HW_DECODE_MODE=hardware
+      # 硬件编码 API：nvenc(NVIDIA) / qsv(Intel) / vaapi / amf / auto
+      - NOWEN_TRANSCODE_HW_ENCODER=nvenc
+
+      # ---- ffmpeg/ffprobe 路径（指向挂载进来的自备二进制）----
+      - NOWEN_APP_FFMPEG_PATH=/ffmpeg/ffmpeg
+      - NOWEN_APP_FFPROBE_PATH=/ffmpeg/ffprobe
+
+      # 若你的 ffmpeg 是 ffmpeg-over-ip client，把它连接 server 所需的
+      # 环境变量也写在这里（示例，按 ffoip 文档实际名称填写/取消注释）：
+      # - FFOIP_SERVER=192.168.x.x:PORT
+      # - FFOIP_KEY=your-hmac-key
+
+    volumes:
+      # 数据 / 缓存（可写）
+      - ./data:/data
+      - ./cache:/cache
+
+      # 媒体目录（只读；按实际路径修改，可挂多个）
+      - /volume1/Media:/media:ro
+
+      # ---- 自备 ffmpeg/ffprobe（按宿主机实际路径修改左边）----
+      # 请确保挂载进来的二进制在 alpine 容器内可直接运行：
+      #  · 推荐静态编译版本（musl/glibc 静态），单挂二进制即可；
+      #  · 若是动态链接的系统 ffmpeg，需一并挂载其依赖的 .so（用 ldd 查看），
+      #    否则容器内会报 "not found"；
+      #  · ffmpeg-over-ip client 按其自身文档挂载与配置。
+      - /usr/bin/ffmpeg:/ffmpeg/ffmpeg:ro
+      - /usr/bin/ffprobe:/ffmpeg/ffprobe:ro
+
+    # 容器本身无显卡 / 无 DRM 节点，因此不配置 devices。
+    # （如改在有 GPU 的主机本地跑，才需要 nvidia runtime 或 /dev/dri。）
+
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8080/api/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+        reservations:
+          memory: 384M
