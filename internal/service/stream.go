@@ -154,6 +154,16 @@ func (s *StreamService) SetSettingRepo(repo *repository.SystemSettingRepo) {
 	s.settingRepo = repo
 }
 
+// DefaultQualityPreset 返回播放默认档位 id（§3.1 default_quality_preset，默认 "auto"）。
+func (s *StreamService) DefaultQualityPreset() string {
+	if s.settingRepo != nil {
+		if v, err := s.settingRepo.Get(SettingKeyDefaultQuality); err == nil && strings.TrimSpace(v) != "" {
+			return strings.TrimSpace(v)
+		}
+	}
+	return defaultQualityPresetName
+}
+
 // ShouldRemux 判断给定媒体在当前客户端 UA 下是否应该走 Remux（零转码）。
 // 这是"秒开"的关键判定：一旦返回 true，应让客户端直接请求 /api/stream/:id/remux
 // 或 /emby/Videos/:id/stream（Emby 层走 remux 分支），完全绕过 HLS 转码。

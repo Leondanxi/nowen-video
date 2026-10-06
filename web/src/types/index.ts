@@ -747,6 +747,34 @@ export interface TMDbImageInfo {
 }
 
 // ==================== 系统全局设置 ====================
+/** 解码/加速总模式（用户高层选择） */
+export type HwDecodeMode = 'auto' | 'software' | 'hardware'
+/** 硬件 API：auto 或具体加速器 */
+export type HwEncoder = 'auto' | 'nvenc' | 'qsv' | 'vaapi' | 'amf'
+
+/**
+ * 共享画质档位（前后端同一份，服务端为权威来源）。
+ * 与后端 profile.Preset / §4 冻结结构对齐。
+ */
+export interface TranscodePreset {
+  /** 档位ID：仅允许 A-Za-z0-9_-（要进 URL） */
+  id: string
+  /** 显示名 */
+  name: string
+  /** 目标宽度；0 = 不缩放 */
+  width: number
+  /** 由 width*9/16 派生（内部用于 HW 缩放/画布） */
+  height: number
+  /** 视频码率 KBPS；0 = 不限制（恒定质量 CRF/CQ） */
+  bitrate: number
+  /** 音频码率 KBPS */
+  audio_bitrate: number
+  /** 每档可选 CRF；0 = 用全局 transcode_crf 或按码率 */
+  crf: number
+  /** 仅 original=true（不可删/不可改 id 与 0 值） */
+  fixed: boolean
+}
+
 export interface SystemSettings {
   enable_gpu_transcode: boolean
   gpu_fallback_cpu: boolean
@@ -756,6 +784,28 @@ export interface SystemSettings {
   auto_preprocess_on_scan: boolean   // 扫描后自动触发预处理
   auto_transcode_on_play: boolean    // 播放时自动触发转码
   prefer_direct_play: boolean        // 优先直接播放（禁用自动转码）
+
+  // ---- 硬件解码 / ffmpeg 入口（§3.1） ----
+  /** 解码/加速总模式 auto/software/hardware，默认 auto */
+  hw_decode_mode: HwDecodeMode
+  /** 硬件 API：auto/nvenc/qsv/vaapi/amf，默认 auto */
+  hw_encoder: HwEncoder
+  /** ffmpeg 可执行文件/命令（可指向任意 ffmpeg 兼容可执行文件，由部署方自行提供） */
+  ffmpeg_path: string
+  /** ffprobe 可执行文件/命令 */
+  ffprobe_path: string
+  /** 最大并发转码会话 */
+  transcode_max_sessions: number
+  /** HLS 分段时长（秒） */
+  transcode_segment_duration: number
+  /** 软件 x264 CRF / 恒定质量基准 */
+  transcode_crf: number
+  /** 浏览器可播 HEVC（与能力协商并存） */
+  browser_hevc: boolean
+  /** 共享画质档位表；空数组 = 用后端内置默认 */
+  quality_presets: TranscodePreset[]
+  /** 播放默认档位，默认 auto */
+  default_quality_preset: string
 }
 
 // ==================== 豆瓣数据源 ====================

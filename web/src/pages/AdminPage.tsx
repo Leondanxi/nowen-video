@@ -216,13 +216,24 @@ export default function AdminPage() {
   const [scanning, setScanning] = useState<Set<string>>(() => new Set(persistedScanStateRef.current.scanningIds))
   const [sysSettings, setSysSettings] = useState<SystemSettings>({
     enable_gpu_transcode: true,
-    gpu_fallback_cpu: true,
+    gpu_fallback_cpu: false,
     metadata_store_path: '',
     play_cache_path: '',
     enable_direct_link: false,
     auto_preprocess_on_scan: false,
     auto_transcode_on_play: false,
     prefer_direct_play: true,
+    // 硬件解码 / ffmpeg 入口 / 画质档位（§3.1 热设置默认值）
+    hw_decode_mode: 'auto',
+    hw_encoder: 'auto',
+    ffmpeg_path: 'ffmpeg',
+    ffprobe_path: 'ffprobe',
+    transcode_max_sessions: 6,
+    transcode_segment_duration: 6,
+    transcode_crf: 18,
+    browser_hevc: true,
+    quality_presets: [],
+    default_quality_preset: 'auto',
   })
 
   const { connected, on, off } = useWebSocket()

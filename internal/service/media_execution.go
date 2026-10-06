@@ -91,9 +91,10 @@ func NewPlaybackSessionServiceWithExecution(
 	execution *MediaExecutionService,
 	cfg *config.Config,
 	logger *zap.SugaredLogger,
+	settingRepo *repository.SystemSettingRepo,
 ) (*PlaybackSessionService, error) {
 	if execution == nil {
 		return nil, fmt.Errorf("media execution service is required")
 	}
-	return NewPlaybackSessionService(mediaRepo, execution, cfg, logger)
+	return NewPlaybackSessionService(mediaRepo, execution, cfg, logger, settingRepo)
 }

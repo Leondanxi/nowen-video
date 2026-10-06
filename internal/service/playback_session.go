@@ -34,6 +34,8 @@ type PlaybackSessionCreateRequest struct {
 	SubtitleTrack   int    `json:"subtitle_track"`
 	BurnSubtitle    bool   `json:"burn_subtitle"`
 	MaxBitrate      int    `json:"max_bitrate"`
+	// Backend 可选；空=按设置（hw_decode_mode/hw_encoder）解析（§10）。
+	Backend string `json:"backend"`
 }
 
 type PlaybackSessionRestartRequest struct {
@@ -44,6 +46,8 @@ type PlaybackSessionRestartRequest struct {
 	BurnSubtitle    bool   `json:"burn_subtitle"`
 	MaxBitrate      int    `json:"max_bitrate"`
 	Reason          string `json:"reason"`
+	// Backend 可选；空=按设置解析（§10）。
+	Backend string `json:"backend"`
 }
 
 type PlaybackSessionHeartbeatRequest struct {
@@ -85,6 +89,7 @@ type PlaybackSessionService struct {
 	manager     *playbacksession.Manager
 	runner      *playbacktranscode.Runner
 	logger      *zap.SugaredLogger
+	settingRepo *repository.SystemSettingRepo
 	startupWait time.Duration
 	heartbeat   time.Duration
 }
@@ -94,6 +99,7 @@ func NewPlaybackSessionService(
 	execution *MediaExecutionService,
 	cfg *config.Config,
 	logger *zap.SugaredLogger,
+	settingRepo *repository.SystemSettingRepo,
 ) (*PlaybackSessionService, error) {
 	if mediaRepo == nil {
 		return nil, fmt.Errorf("media repository is required")
@@ -116,11 +122,15 @@ func NewPlaybackSessionService(
 		return nil, err
 	}
 	runnerConfig := playbacktranscode.DefaultConfig(
-		cfg.App.FFmpegPath,
+		ResolveFFmpegPath(settingRepo, cfg),
 		execution.GetHWAccelInfo(),
 		cfg.App.VAAPIDevice,
 		ffmpeg.CalcThreads(cfg),
 	)
+	// 分段时长 / CRF 来自热设置（§3.1）。ffmpeg 子进程不做专门 env 拼装：
+	// Command.Env 留空 → Go exec 自动继承完整父进程环境（用户容器 env 天然透传）。
+	runnerConfig.SegmentDuration = settingInt(settingRepo, SettingKeyTranscodeSegDur, defaultTranscodeSegDur)
+	runnerConfig.TranscodeCRF = settingInt(settingRepo, SettingKeyTranscodeCRF, defaultTranscodeCRF)
 	// Older VC-1/WMV inputs and cold GPU initialization can legitimately need
 	// more than four seconds before the first HLS segment appears. Keep the
 	// hardware attempt long enough to distinguish slow startup from a real
@@ -146,6 +156,7 @@ func NewPlaybackSessionService(
 		manager:     manager,
 		runner:      runner,
 		logger:      logger,
+		settingRepo: settingRepo,
 		startupWait: defaultPlaybackStartupWait,
 		heartbeat:   defaultPlaybackHeartbeatInterval,
 	}, nil
@@ -182,7 +193,7 @@ func (s *PlaybackSessionService) Create(
 		return PlaybackSessionResult{}, err
 	}
 
-	execution, err := s.startGeneration(ctx, media, created.ID, created.PendingGenerationID, profileID, request.StartPositionMS)
+	execution, err := s.startGeneration(ctx, media, created.ID, created.PendingGenerationID, profileID, request.StartPositionMS, request.Backend)
 	if err != nil {
 		s.closeAfterStartFailure(created.ID)
 		return PlaybackSessionResult{}, err
@@ -224,7 +235,7 @@ func (s *PlaybackSessionService) Restart(
 	if err != nil {
 		return PlaybackSessionResult{}, err
 	}
-	execution, err := s.startGeneration(ctx, media, sessionID, generation.ID, profileID, request.StartPositionMS)
+	execution, err := s.startGeneration(ctx, media, sessionID, generation.ID, profileID, request.StartPositionMS, request.Backend)
 	if err != nil {
 		_ = s.manager.MarkGenerationFailed(sessionID, generation.ID, "generation_start_failed", err.Error())
 		return PlaybackSessionResult{}, err
@@ -301,6 +312,7 @@ func (s *PlaybackSessionService) startGeneration(
 	generationID uint64,
 	profileID string,
 	startPositionMS int64,
+	backendPref string,
 ) (*playbacktranscode.Execution, error) {
 	inputPath := ResolveRemoteFFmpegURL(s.cfg, media.FilePath)
 	if unresolvedRemoteInput(inputPath) {
@@ -312,6 +324,7 @@ func (s *PlaybackSessionService) startGeneration(
 			fps = value
 		}
 	}
+	backend, disableFallback := s.resolveBackend(backendPref)
 	return s.runner.Start(ctx, playbacktranscode.StartRequest{
 		SessionID:       sessionID,
 		GenerationID:    generationID,
@@ -320,7 +333,36 @@ func (s *PlaybackSessionService) startGeneration(
 		ProfileID:       profileID,
 		StartPositionMS: startPositionMS,
 		FPS:             fps,
+		Backend:         backend,
+		DisableFallback: disableFallback,
+		SourceIsAV1:     isAV1Codec(media.VideoCodec),
 	})
+}
+
+// resolveBackend 按 §6 解析有效后端：显式 backend 优先；否则用
+// hw_decode_mode/hw_encoder（热设置 > 环境变量 > 默认）结合本地探测。
+// DisableFallback（§8）由设置推导。
+func (s *PlaybackSessionService) resolveBackend(forced string) (string, bool) {
+	hwMode := resolveHWDecodeMode(s.settingRepo)
+	hwEnc := resolveHWEncoder(s.settingRepo)
+	detected := s.execution.GetHWAccelInfo()
+	backend := ffmpeg.ResolveBackend(hwMode, hwEnc, detected)
+	if forced = strings.TrimSpace(forced); forced != "" {
+		backend = forced
+	}
+	disableFallback := hwMode == ffmpeg.HWModeHardware &&
+		!settingBool(s.settingRepo, SettingKeyGPUFallbackCPU, defaultGPUFallbackCPU)
+	return backend, disableFallback
+}
+
+// isAV1Codec 判断源视频编码是否为 AV1（Turing 无 AV1 硬编解码，§7 边界）。
+func isAV1Codec(codec string) bool {
+	switch strings.ToLower(strings.TrimSpace(codec)) {
+	case "av1", "av01":
+		return true
+	default:
+		return strings.Contains(strings.ToLower(strings.TrimSpace(codec)), "av1")
+	}
 }
 
 func (s *PlaybackSessionService) waitForStartup(

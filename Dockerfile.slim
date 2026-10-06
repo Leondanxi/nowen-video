@@ -1,0 +1,72 @@
+# syntax=docker/dockerfile:1.6
+# Nowen Video —— "app-only / 本体镜像"
+#
+# 只打包 Nowen 本体（server 二进制 + Web 前端），**刻意不安装 ffmpeg/ffprobe，
+# 也不安装任何硬件加速驱动**。ffmpeg/ffprobe 由你自己准备并挂载进容器：
+#   - 用 -v 把 ffmpeg/ffprobe 挂到 /ffmpeg 下（默认路径见下方 ENV）；
+#   - 也可以是任意 ffmpeg 兼容客户端（例如远程转码 / ffmpeg-over-ip 的 client）。
+#
+# 容器本身可以没有 GPU：把 NOWEN_TRANSCODE_HW_DECODE_MODE=hardware 与
+# NOWEN_TRANSCODE_HW_ENCODER=nvenc 传入，本体就会按硬件管线生成参数、绕过
+# "探测不到 GPU 即回退 CPU" 的逻辑，实际编解码在你挂载的客户端 / 远端 GPU 完成。
+
+FROM --platform=$BUILDPLATFORM node:20-alpine AS frontend
+ARG NOWEN_VERSION=0.1.0
+WORKDIR /app/web
+COPY web/package*.json ./
+RUN npm ci
+COPY web/ .
+ENV VITE_APP_VERSION=${NOWEN_VERSION}
+RUN npm run build
+
+FROM --platform=$BUILDPLATFORM golang:1.25-alpine AS backend
+ARG TARGETOS
+ARG TARGETARCH
+ARG NOWEN_VERSION=0.1.0
+WORKDIR /app
+ENV GOPROXY=https://goproxy.cn,https://goproxy.io,direct
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+COPY --from=frontend /app/web/dist ./web/dist
+RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
+    go build -trimpath \
+      -ldflags="-s -w -X github.com/nowen-video/nowen-video/internal/version.Version=${NOWEN_VERSION}" \
+      -o nowen-video ./cmd/server-lite
+
+# ---- 运行时：只含本体，不含 ffmpeg / 硬件驱动 ----
+FROM alpine:3.24
+ARG NOWEN_VERSION=0.1.0
+
+# 仅保留运行本体与入口脚本所需的最小依赖；不装 ffmpeg。
+RUN apk add --no-cache tzdata ca-certificates su-exec
+
+RUN addgroup -S nowen && adduser -S nowen -G nowen
+WORKDIR /app
+COPY --from=backend /app/nowen-video /usr/local/bin/nowen-video
+COPY --from=frontend /app/web/dist /app/web/dist
+COPY scripts/docker-entrypoint.sh /entrypoint.sh
+
+RUN mkdir -p /data /cache /media /ffmpeg \
+    && chown -R nowen:nowen /data /cache /media \
+    && chmod +x /entrypoint.sh
+
+ENV NOWEN_APP_PORT=8080
+ENV NOWEN_APP_DATA_DIR=/data
+ENV NOWEN_APP_WEB_DIR=/app/web/dist
+ENV NOWEN_DATABASE_DB_PATH=/data/nowen.db
+ENV NOWEN_CACHE_CACHE_DIR=/cache
+ENV NOWEN_LOGGING_LEVEL=info
+ENV NOWEN_VERSION=${NOWEN_VERSION}
+ENV TZ=Asia/Shanghai
+
+# ffmpeg/ffprobe 由你挂载到 /ffmpeg 下（按实际挂载路径覆盖这两个变量）。
+ENV NOWEN_APP_FFMPEG_PATH=/ffmpeg/ffmpeg
+ENV NOWEN_APP_FFPROBE_PATH=/ffmpeg/ffprobe
+
+EXPOSE 8080
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+  CMD /bin/busybox wget -q -O /dev/null http://localhost:8080/api/health || exit 1
+
+CMD ["/entrypoint.sh"]

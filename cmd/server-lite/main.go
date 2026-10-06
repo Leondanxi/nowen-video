@@ -54,6 +54,7 @@ func main() {
 		services.MediaExecution,
 		cfg,
 		sugar,
+		repos.SystemSetting,
 	)
 	if err != nil {
 		sugar.Fatalf("初始化临时播放会话服务失败: %v", err)

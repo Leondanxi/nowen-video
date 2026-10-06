@@ -4,7 +4,8 @@ import { usePlayerStore } from '@/stores/player'
 import { useAuthStore } from '@/stores/auth'
 import { mediaApi, userApi, subtitleApi, subtitlePreprocessApi } from '@/api'
 import { useWebSocket, WS_EVENTS } from '@/hooks/useWebSocket'
-import type { SubtitleTrack, ExternalSubtitle, ASRTask, TranslatedSubtitle, SubtitlePreprocessTask, DanmakuComment } from '@/types'
+import type { SubtitleTrack, ExternalSubtitle, ASRTask, TranslatedSubtitle, SubtitlePreprocessTask, DanmakuComment, TranscodePreset } from '@/types'
+import { AutoQualityController, ORIGINAL_PRESET_ID } from '@/playback/autoQuality'
 import {
   Play,
   Pause,
@@ -47,6 +48,14 @@ interface VideoPlayerProps {
   onRemuxFallback?: () => void
   onPreprocessReady?: () => void
   spriteVttUrl?: string
+  /** 共享画质档位（服务端权威，不含 auto）。提供后即显示画质菜单。 */
+  qualityPresets?: TranscodePreset[]
+  /** 当前选中的档位 id；'auto' 表示自动档 */
+  activeQualityId?: string
+  /** 是否处于自动 ABR 模式（自动档开启时由自动控制器驱动选档） */
+  autoEnabled?: boolean
+  /** 选档回调（手动 + 自动控制器均经此上报给上层执行会话重启/重新规划） */
+  onRequestQuality?: (presetId: string, source: 'manual' | 'auto') => void
 }
 
 const PLAYER_CONTROL_CLASS = 'flex h-9 min-w-9 items-center justify-center rounded-[var(--nv-player-radius-control)] text-[var(--nv-player-text-secondary)] transition-[background-color,color,transform] hover:bg-[var(--nv-player-surface-hover)] hover:text-[var(--nv-player-text-primary)] active:scale-[0.98]'
@@ -70,6 +79,10 @@ export default function VideoPlayer({
   onPreprocessReady,
   onRemuxFallback,
   spriteVttUrl,
+  qualityPresets = [],
+  activeQualityId = 'auto',
+  autoEnabled = false,
+  onRequestQuality,
 }: VideoPlayerProps) {
   const videoRef = useRef<HTMLVideoElement>(null)
   const hlsRef = useRef<Hls | null>(null)
@@ -96,8 +109,6 @@ export default function VideoPlayer({
   } = usePlayerStore()
 
   const [showQuality, setShowQuality] = useState(false)
-  const [qualities, setQualities] = useState<{ index: number; label: string; bitrate?: number; height?: number }[]>([])
-  const [currentQuality, setCurrentQuality] = useState(-1)
   const [loadError, setLoadError] = useState<string | null>(null)
   const [currentBitrate, setCurrentBitrate] = useState(0)
   const [bandwidthEstimate, setBandwidthEstimate] = useState(0)
@@ -163,6 +174,15 @@ export default function VideoPlayer({
     side: 'left' | 'right'
   } | null>(null)
   const gestureOverlayTimer = useRef<number>(0)
+
+  // 自动 ABR 控制器（纯逻辑，跨 src 重启保持 refs 状态）
+  const autoControllerRef = useRef<AutoQualityController | null>(null)
+  const autoTickTimerRef = useRef<number>(0)
+  const seekGuardRef = useRef(false)
+  const onRequestQualityRef = useRef(onRequestQuality)
+  onRequestQualityRef.current = onRequestQuality
+  const autoEnabledRef = useRef(autoEnabled)
+  autoEnabledRef.current = autoEnabled
 
   const { on, off } = useWebSocket()
 
@@ -406,7 +426,6 @@ export default function VideoPlayer({
 
     if (mode === 'direct' || mode === 'remux' || mode === 'smart_remux') {
       video.src = src
-      setQualities([])
       video.addEventListener('loadedmetadata', () => {
         if (startPosition > 0) video.currentTime = startPosition
         video.play().catch(() => {})
@@ -438,19 +457,11 @@ export default function VideoPlayer({
       })
       hls.loadSource(src)
       hls.attachMedia(video)
-      hls.on(Hls.Events.MANIFEST_PARSED, (_event, data) => {
-        const levels = data.levels.map((level, index) => ({
-          index,
-          label: `${level.height}p`,
-          bitrate: level.bitrate,
-          height: level.height,
-        }))
-        setQualities([{ index: -1, label: '自动' }, ...levels])
+      hls.on(Hls.Events.MANIFEST_PARSED, () => {
         if (startPosition > 0) video.currentTime = startPosition
         video.play().catch(() => {})
       })
       hls.on(Hls.Events.LEVEL_SWITCHED, (_event, data) => {
-        setCurrentQuality(data.level)
         const level = hls.levels?.[data.level]
         if (level?.bitrate) setCurrentBitrate(level.bitrate)
       })
@@ -466,10 +477,17 @@ export default function VideoPlayer({
       hls.on(Hls.Events.AUDIO_TRACK_SWITCHED, (_event, data) => setCurrentAudioTrack(data.id))
       const updateBandwidthEstimate = () => {
         const estimate = Math.round((hls as unknown as { bandwidthEstimate: number }).bandwidthEstimate || 0)
-        if (estimate > 0) setBandwidthEstimate(estimate)
+        if (estimate > 0) {
+          setBandwidthEstimate(estimate)
+          autoControllerRef.current?.notifyBandwidth(estimate)
+        }
       }
       hls.on(Hls.Events.FRAG_LOADED, updateBandwidthEstimate)
+      hls.on(Hls.Events.FRAG_BUFFERED, updateBandwidthEstimate)
       hls.on(Hls.Events.ERROR, (_event, data) => {
+        if (data.details === Hls.ErrorDetails.BUFFER_STALLED_ERROR) {
+          autoControllerRef.current?.notifyStalledError()
+        }
         if (!data.fatal) return
         switch (data.type) {
           case Hls.ErrorTypes.NETWORK_ERROR:
@@ -498,6 +516,77 @@ export default function VideoPlayer({
       hlsRef.current = null
     }
   }, [src, mode, startPosition, reset, onRemuxFallback])
+
+  // 构建自动档阶梯（高→低，原画在前）；原画未知源码率视为需要无限带宽
+  useEffect(() => {
+    if (!autoControllerRef.current) autoControllerRef.current = new AutoQualityController()
+    const rungs = qualityPresets.map((preset) => ({
+      id: preset.id,
+      bitrateKbps: preset.id === ORIGINAL_PRESET_ID || preset.bitrate <= 0 ? Number.POSITIVE_INFINITY : preset.bitrate,
+    }))
+    autoControllerRef.current.setRungs(rungs)
+    // 对齐到当前外部档位
+    if (activeQualityId && activeQualityId !== 'auto') {
+      autoControllerRef.current.adoptRung(activeQualityId, Date.now())
+    }
+  }, [qualityPresets, activeQualityId])
+
+  // 进入自动档：从原画起；退出自动档：停止 tick（控制器保留状态但不再决策）
+  useEffect(() => {
+    if (autoEnabled) {
+      autoControllerRef.current?.reset(Date.now())
+    }
+  }, [autoEnabled])
+
+  // 原生卡顿/缓冲健康度喂入 + 周期 tick（仅 hls.js 路径；Safari 原生 HLS 优雅降级）
+  useEffect(() => {
+    const video = videoRef.current
+    if (!video) return
+    if (!Hls.isSupported()) return // 无 hls.js：自动逻辑保守不启动
+
+    const onWaiting = () => {
+      if (seekGuardRef.current) return // seek 触发的等待不计入卡顿
+      autoControllerRef.current?.notifyStallChange(true, Date.now())
+    }
+    const onStalled = () => { if (!seekGuardRef.current) autoControllerRef.current?.notifyStallChange(true, Date.now()) }
+    const onPlaying = () => autoControllerRef.current?.notifyStallChange(false, Date.now())
+    const onSeeking = () => { seekGuardRef.current = true }
+    const onSeeked = () => {
+      seekGuardRef.current = false
+      autoControllerRef.current?.notifyStallChange(false, Date.now())
+    }
+
+    video.addEventListener('waiting', onWaiting)
+    video.addEventListener('stalled', onStalled)
+    video.addEventListener('playing', onPlaying)
+    video.addEventListener('seeking', onSeeking)
+    video.addEventListener('seeked', onSeeked)
+
+    autoTickTimerRef.current = window.setInterval(() => {
+      if (!autoEnabledRef.current) return
+      // 前向缓冲健康度
+      const current = video.currentTime || 0
+      let bufferedEnd = current
+      try {
+        if (video.buffered.length > 0) bufferedEnd = video.buffered.end(video.buffered.length - 1)
+      } catch { /* ignore */ }
+      autoControllerRef.current?.notifyBufferHealth(Math.max(0, bufferedEnd - current))
+
+      const decision = autoControllerRef.current?.tick(Date.now())
+      if (decision && decision.type === 'switch') {
+        onRequestQualityRef.current?.(decision.rungId, 'auto')
+      }
+    }, 500)
+
+    return () => {
+      video.removeEventListener('waiting', onWaiting)
+      video.removeEventListener('stalled', onStalled)
+      video.removeEventListener('playing', onPlaying)
+      video.removeEventListener('seeking', onSeeking)
+      video.removeEventListener('seeked', onSeeked)
+      window.clearInterval(autoTickTimerRef.current)
+    }
+  }, [])
 
   const remuxOffsetRef = useRef(0)
 
@@ -660,14 +749,6 @@ export default function VideoPlayer({
   const toggleFullscreen = () => {
     if (document.fullscreenElement) document.exitFullscreen()
     else containerRef.current?.requestFullscreen()
-  }
-
-  const switchQuality = (index: number) => {
-    if (hlsRef.current) {
-      hlsRef.current.currentLevel = index
-      setCurrentQuality(index)
-    }
-    setShowQuality(false)
   }
 
   const switchAudioTrack = (id: number) => {
@@ -1338,29 +1419,44 @@ export default function VideoPlayer({
             </div>
           )}
 
-          {qualities.length > 1 && (
-            <div className="relative">
-              <button type="button" onClick={() => openExclusive('quality')} className={clsx(PLAYER_CONTROL_CLASS, showQuality && 'border border-[var(--nv-player-accent-border)] bg-[var(--nv-player-accent-soft)] text-[var(--nv-player-accent)]')} title="画质" aria-expanded={showQuality}><Settings size={18} aria-hidden="true" /></button>
-              {showQuality && (
-                <div className={clsx(PLAYER_MENU_CLASS, 'min-w-[240px]')} role="menu">
-                  <div className={PLAYER_MENU_LABEL}>画质</div>
-                  {qualities.map((quality) => (
-                    <button key={quality.index} type="button" onClick={() => switchQuality(quality.index)} className={menuItemClass(quality.index === currentQuality)} role="menuitemradio" aria-checked={quality.index === currentQuality}>
-                      <span className="flex-1">{quality.label}</span>
-                      {quality.bitrate ? <span className="text-[11px] text-[var(--nv-player-text-faint)]">{(quality.bitrate / 1_000_000).toFixed(1)} Mbps</span> : null}
-                    </button>
-                  ))}
-                  {mode !== 'direct' && mode !== 'remux' && mode !== 'smart_remux' && (
-                    <div className="mt-2 border-t border-[var(--nv-player-border-subtle)] px-3 py-2.5 text-[11px] leading-relaxed text-[var(--nv-player-text-tertiary)]">
-                      <div className="mb-1 font-medium text-[var(--nv-player-text-secondary)]">实时状态</div>
-                      {currentBitrate > 0 && <div className="flex justify-between gap-4"><span>当前码率</span><span className="text-[var(--nv-player-text-primary)]">{(currentBitrate / 1_000_000).toFixed(2)} Mbps</span></div>}
-                      {bandwidthEstimate > 0 && <div className="flex justify-between gap-4"><span>带宽评估</span><span className="text-[var(--nv-player-text-primary)]">{(bandwidthEstimate / 1_000_000).toFixed(2)} Mbps</span></div>}
-                    </div>
-                  )}
+          <div className="relative">
+            <button type="button" onClick={() => openExclusive('quality')} className={clsx(PLAYER_CONTROL_CLASS, showQuality && 'border border-[var(--nv-player-accent-border)] bg-[var(--nv-player-accent-soft)] text-[var(--nv-player-accent)]')} title="画质" aria-expanded={showQuality}><Settings size={18} aria-hidden="true" /></button>
+            {showQuality && (
+              <div className={clsx(PLAYER_MENU_CLASS, 'min-w-[240px]')} role="menu">
+                <div className={PLAYER_MENU_LABEL}>画质</div>
+                <button
+                  type="button"
+                  onClick={() => { onRequestQuality?.('auto', 'manual'); setShowQuality(false) }}
+                  className={menuItemClass(activeQualityId === 'auto')}
+                  role="menuitemradio"
+                  aria-checked={activeQualityId === 'auto'}
+                >
+                  <span className="flex-1">自动</span>
+                  {autoEnabled && <span className="text-[10px] text-[var(--nv-player-accent)]">ABR</span>}
+                </button>
+                {qualityPresets.map((preset) => (
+                  <button
+                    key={preset.id}
+                    type="button"
+                    onClick={() => { onRequestQuality?.(preset.id, 'manual'); setShowQuality(false) }}
+                    className={menuItemClass(activeQualityId === preset.id)}
+                    role="menuitemradio"
+                    aria-checked={activeQualityId === preset.id}
+                  >
+                    <span className="flex-1">{preset.name}{preset.fixed ? '（固定）' : ''}</span>
+                    {preset.bitrate > 0
+                      ? <span className="text-[11px] text-[var(--nv-player-text-faint)]">{preset.bitrate} KBPS</span>
+                      : <span className="text-[11px] text-[var(--nv-player-text-faint)]">{preset.width > 0 ? 'CRF' : '原画'}</span>}
+                  </button>
+                ))}
+                <div className="mt-2 border-t border-[var(--nv-player-border-subtle)] px-3 py-2.5 text-[11px] leading-relaxed text-[var(--nv-player-text-tertiary)]">
+                  <div className="mb-1 font-medium text-[var(--nv-player-text-secondary)]">实时状态</div>
+                  {currentBitrate > 0 && <div className="flex justify-between gap-4"><span>当前码率</span><span className="text-[var(--nv-player-text-primary)]">{(currentBitrate / 1_000_000).toFixed(2)} Mbps</span></div>}
+                  {bandwidthEstimate > 0 && <div className="flex justify-between gap-4"><span>带宽评估</span><span className="text-[var(--nv-player-text-primary)]">{(bandwidthEstimate / 1_000_000).toFixed(2)} Mbps</span></div>}
                 </div>
-              )}
-            </div>
-          )}
+              </div>
+            )}
+          </div>
 
           <button
             type="button"
