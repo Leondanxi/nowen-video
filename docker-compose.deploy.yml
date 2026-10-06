@@ -63,6 +63,14 @@ services:
       # - /vol01/Media/电视剧:/media/电视剧
       # 绿联 NAS 示例：
       # - /volume1/Media:/media
+      # ---- ffmpeg-over-ip client（可选，远程 GPU VM 转码）----
+      # 预构建镜像不含 ffoip client；如需把转码卸载到带 GPU 的 Windows VM，
+      # 先从 https://github.com/steelbrain/ffmpeg-over-ip/releases 下载匹配架构的
+      # `linux-<amd64|arm64>-ffmpeg-over-ip-client.zip` 并解压到宿主机，例如
+      # /opt/ffoip/ffmpeg-over-ip-client，chmod +x 后取消下面两行注释（同一文件
+      # 经 argv[0] 同时充当 ffmpeg 与 ffprobe）：
+      # - /opt/ffoip/ffmpeg-over-ip-client:/opt/ffoip/ffmpeg:ro
+      # - /opt/ffoip/ffmpeg-over-ip-client:/opt/ffoip/ffprobe:ro
     # 硬件加速设备（按 SoC 开启对应的）
     devices:
       # 通用 DRM 节点（Mali / 瑞芯微 / Amlogic / Intel 都会暴露这个）
@@ -102,6 +110,16 @@ services:
       - NOWEN_ADULT_SCRAPER_PYTHON_EXECUTABLE=/usr/bin/python3
       - NOWEN_ADULT_SCRAPER_PYTHON_SERVICE_DIR=/app/scripts/adult-scraper
       # - NOWEN_ADULT_SCRAPER_PYTHON_SERVICE_API_KEY=your-random-key
+      # ---- ffmpeg-over-ip client 连接（可选；勿在此写真地址/密钥）----
+      # 经同目录 .env 注入；出站 TCP 需可达 Windows GPU VM 的 5050 端口。
+      # .env 示例：
+      #   FFOIP_SERVER_ADDRESS=192.168.1.50:5050
+      #   FFOIP_AUTH_SECRET=<强随机密钥，与 Windows server 端一致>
+      # 取消下面注释：
+      # - FFMPEG_OVER_IP_CLIENT_ADDRESS=${FFOIP_SERVER_ADDRESS}
+      # - FFMPEG_OVER_IP_CLIENT_AUTH_SECRET=${FFOIP_AUTH_SECRET}
+      # - FFMPEG_OVER_IP_CLIENT_LOG=/cache/ffmpeg-over-ip.client.log
+      # - FFMPEG_OVER_IP_CLIENT_FALLBACK_TO_LOCAL=false
       - TZ=Asia/Shanghai
     restart: unless-stopped
     deploy:

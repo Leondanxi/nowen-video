@@ -29,6 +29,16 @@ FROM alpine:3.24
 ARG TARGETARCH
 ARG NOWEN_VERSION=0.1.0
 ARG FFMPEG_VERSION=8.1.2-r0
+# ---------------------------------------------------------------------------
+# OPTIONAL ffmpeg-over-ip client bundle (DISABLED BY DEFAULT).
+#   FFOIP_VERSION pins a GitHub release tag, e.g. v5.2.1. Leave EMPTY ("") to
+#   skip (default). Prefer read-only bind-mount — see
+#   docs/ffmpeg-over-ip-deploy.md. When set, fetches
+#     https://github.com/steelbrain/ffmpeg-over-ip/releases/download/<TAG>/linux-<TARGETARCH>-ffmpeg-over-ip-client.zip
+#   and installs it at /opt/ffoip/ffmpeg with an argv[0] ffprobe symlink.
+#   System ffmpeg below is kept intact as a local fallback. No secrets baked in.
+# ---------------------------------------------------------------------------
+ARG FFOIP_VERSION=""
 
 RUN apk add --no-cache \
       "ffmpeg=${FFMPEG_VERSION}" \
@@ -55,6 +65,28 @@ RUN set -eux; \
       apk add --no-cache mesa-va-gallium libva-utils; \
     fi; \
     rm -rf /var/cache/apk/*
+
+# Optional ffmpeg-over-ip client bundle; no-op unless --build-arg FFOIP_VERSION=<tag>.
+# Keeps the system ffmpeg above as a local fallback. See docs/ffmpeg-over-ip-deploy.md.
+RUN set -eux; \
+    if [ -n "${FFOIP_VERSION}" ]; then \
+      apk add --no-cache curl unzip; \
+      mkdir -p /opt/ffoip; \
+      echo "Bundling ffmpeg-over-ip client ${FFOIP_VERSION} for linux-${TARGETARCH}"; \
+      curl -fsSL -o /tmp/ffoip.zip \
+        "https://github.com/steelbrain/ffmpeg-over-ip/releases/download/${FFOIP_VERSION}/linux-${TARGETARCH}-ffmpeg-over-ip-client.zip"; \
+      tmp="$(mktemp -d)"; \
+      unzip -o -q /tmp/ffoip.zip -d "${tmp}"; \
+      bin="$(find "${tmp}" -type f \( -name 'ffmpeg-over-ip-client*' -o -name 'ffmpeg-over-ip' \) | head -n1)"; \
+      [ -n "${bin}" ] || { echo "ffmpeg-over-ip client binary not found in release zip" >&2; exit 1; }; \
+      install -m 0755 "${bin}" /opt/ffoip/ffmpeg; \
+      ln -sf ffmpeg /opt/ffoip/ffprobe; \
+      chmod -R a+rX /opt/ffoip; \
+      rm -rf /tmp/ffoip.zip "${tmp}"; \
+      ls -l /opt/ffoip; \
+    else \
+      echo "FFOIP_VERSION not set -> skipping ffmpeg-over-ip client bundle (system ffmpeg remains the only ffmpeg)."; \
+    fi
 
 RUN addgroup -S nowen && adduser -S nowen -G nowen
 WORKDIR /app

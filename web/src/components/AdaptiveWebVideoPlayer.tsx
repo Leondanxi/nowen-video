@@ -5,6 +5,8 @@ import SessionVideoPlayer from './SessionVideoPlayer'
 import { streamApi, type PlaybackMethod, type PlaybackPlan } from '@/api/stream'
 import { usePlayerStore } from '@/stores/player'
 import { getMediaCapabilities, analyzeMediaError } from '@/utils/media-capabilities'
+import type { TranscodePreset } from '@/types'
+import { getRememberedQuality, rememberQuality } from '@/playback/qualityMemory'
 
 export type BrowserPlaybackMode = 'direct' | 'remux' | 'smart_remux' | 'hls'
 
@@ -126,6 +128,20 @@ export default function AdaptiveWebVideoPlayer({
   const [terminalError, setTerminalError] = useState<string | null>(null)
   const [lastTransition, setLastTransition] = useState<PlaybackTransition | null>(null)
 
+  // 共享画质档位 + 当前选档（每片记忆优先于全局默认 auto）
+  const [qualityPresets, setQualityPresets] = useState<TranscodePreset[]>([])
+  const rememberedQuality = useMemo(() => getRememberedQuality(mediaId), [mediaId])
+  const [activeQualityId, setActiveQualityId] = useState<string>(rememberedQuality || 'auto')
+  const [autoEnabled, setAutoEnabled] = useState(rememberedQuality !== null && rememberedQuality !== 'auto')
+
+  useEffect(() => {
+    let disposed = false
+    streamApi.getQualityPresets()
+      .then((res) => { if (!disposed) setQualityPresets(res.data.data.presets || []) })
+      .catch(() => { if (!disposed) setQualityPresets([]) })
+    return () => { disposed = true }
+  }, [mediaId])
+
   useEffect(() => {
     const resetConfig = resetConfigRef.current
     operationRef.current += 1
@@ -153,6 +169,31 @@ export default function AdaptiveWebVideoPlayer({
   }, [activePlan, initialSrc, requiresSession])
 
   useEffect(() => { onModeChange?.(activeMode, activePlan) }, [activeMode, activePlan, onModeChange])
+
+  // 选档统一入口：直连/remux 无会话时 → forceTranscode+quality 重新规划建会话；
+  // 已有会话时由 SessionVideoPlayer 自行 restart（这里仅同步 UI 状态）。
+  const handleRequestQuality = useCallback((presetId: string, source: 'manual' | 'auto') => {
+    if (source === 'manual') rememberQuality(mediaId, presetId)
+    setActiveQualityId(presetId)
+    setAutoEnabled(presetId === 'auto')
+    if (requiresSession) return
+
+    const needTranscode = presetId !== 'auto' && presetId !== 'original'
+    const quality = presetId === 'auto' ? undefined : presetId
+    const preset = qualityPresets.find((p) => p.id === presetId)
+    const maxBitrate = preset && preset.bitrate > 0 ? preset.bitrate * 1000 : undefined
+
+    void streamApi.getPlaybackPlan(mediaId, {
+      supportsDirect: !needTranscode,
+      supportsRemux: !needTranscode,
+      forceTranscode: needTranscode,
+      quality,
+      maxBitrate,
+    }).then((res) => {
+      const nextPlan = res.data.data
+      if (planHasUsableSource(nextPlan)) setActivePlan(nextPlan)
+    }).catch(() => {})
+  }, [mediaId, requiresSession, qualityPresets])
 
   const requestFallback = useCallback(async (video: HTMLVideoElement) => {
     const from = activeMode
@@ -304,6 +345,8 @@ export default function AdaptiveWebVideoPlayer({
           nextTitle={nextTitle}
           onPreprocessReady={onPreprocessReady}
           spriteVttUrl={spriteVttUrl}
+          qualityPresets={qualityPresets}
+          initialQualityId={activeQualityId}
         />
       ) : (
         <VideoPlayer
@@ -320,6 +363,10 @@ export default function AdaptiveWebVideoPlayer({
           knownDuration={knownDuration}
           onPreprocessReady={onPreprocessReady}
           spriteVttUrl={spriteVttUrl}
+          qualityPresets={qualityPresets}
+          activeQualityId={activeQualityId}
+          autoEnabled={autoEnabled}
+          onRequestQuality={handleRequestQuality}
         />
       )}
 

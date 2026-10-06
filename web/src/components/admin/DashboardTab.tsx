@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import type { SystemInfo, SystemSettings } from '@/types'
+import type { SystemInfo, SystemSettings, TranscodePreset } from '@/types'
 import type { ScanProgressData, ScrapeProgressData, TranscodeProgressData, ScanPhaseData } from '@/hooks/useWebSocket'
 import {
   Activity,
@@ -13,6 +13,7 @@ import {
   Merge,
   MonitorPlay,
   Play,
+  Plus,
   Save,
   Scan,
   Server,
@@ -24,7 +25,7 @@ import {
 } from 'lucide-react'
 import { adminApi } from '@/api'
 import { AdminPanel, AdminStatus } from '@/components/admin/AdminPrimitives'
-import { Button, Input, Modal, ModalBody, ModalFooter, ModalHeader, Tag } from '@/components/design-system'
+import { Button, Input, Modal, ModalBody, ModalFooter, ModalHeader, Select, Tag } from '@/components/design-system'
 
 const webAppVersion = import.meta.env.VITE_APP_VERSION || '0.1.0'
 
@@ -367,6 +368,137 @@ export default function DashboardTab({
           )}
         />
 
+        <SettingRow
+          icon={<Cpu size={16} />}
+          title="解码模式"
+          description="自动 / 软件(CPU) / 硬件。选硬件后即使本机探测不到 GPU 也可强制走远端 GPU。"
+          control={(
+            <Select
+              value={sysSettings.hw_decode_mode}
+              onChange={(event) => setSysSettings((s) => ({ ...s, hw_decode_mode: event.target.value as SystemSettings['hw_decode_mode'] }))}
+            >
+              <option value="auto">自动</option>
+              <option value="software">软件</option>
+              <option value="hardware">硬件</option>
+            </Select>
+          )}
+        />
+
+        <SettingRow
+          icon={<Zap size={16} />}
+          title="硬件 API"
+          description="指定硬件编码器；软件模式下置灰。"
+          control={(
+            <Select
+              value={sysSettings.hw_encoder}
+              disabled={sysSettings.hw_decode_mode === 'software'}
+              onChange={(event) => setSysSettings((s) => ({ ...s, hw_encoder: event.target.value as SystemSettings['hw_encoder'] }))}
+            >
+              <option value="auto">自动</option>
+              <option value="nvenc">NVENC</option>
+              <option value="qsv">QSV</option>
+              <option value="vaapi">VAAPI</option>
+              <option value="amf">AMF</option>
+            </Select>
+          )}
+        />
+
+        <SettingRow
+          icon={<FolderCog size={16} />}
+          title="ffmpeg 路径"
+          description="ffmpeg 可执行文件/命令，可指向 ffmpeg-over-ip client（绝对路径）。"
+        >
+          <Input
+            value={sysSettings.ffmpeg_path}
+            onChange={(event) => setSysSettings((s) => ({ ...s, ffmpeg_path: event.target.value }))}
+            placeholder="ffmpeg"
+          />
+        </SettingRow>
+
+        <SettingRow
+          icon={<FolderCog size={16} />}
+          title="ffprobe 路径"
+          description="ffprobe 可执行文件/命令（同 client 的 ffprobe 软链）。"
+        >
+          <Input
+            value={sysSettings.ffprobe_path}
+            onChange={(event) => setSysSettings((s) => ({ ...s, ffprobe_path: event.target.value }))}
+            placeholder="ffprobe"
+          />
+        </SettingRow>
+
+        <SettingRow
+          icon={<Link size={16} />}
+          title="ffmpeg-over-ip"
+          description="把 ffmpeg/ffprobe 视为 ffoip client，启动子进程时注入地址与密钥。"
+          control={(
+            <ToggleButton
+              checked={sysSettings.ffoip_enabled}
+              onChange={() => setSysSettings((s) => ({ ...s, ffoip_enabled: !s.ffoip_enabled }))}
+            />
+          )}
+        >
+          {sysSettings.ffoip_enabled && (
+            <div className="space-y-3 rounded-[var(--nv-radius-control)] border border-[var(--nv-border-subtle)] bg-[var(--nv-bg-surface-soft)] p-3">
+              <div>
+                <label className="mb-1.5 block text-xs font-medium text-[var(--nv-text-tertiary)]">Server 地址（host:port）</label>
+                <Input
+                  value={sysSettings.ffoip_server_address}
+                  onChange={(event) => setSysSettings((s) => ({ ...s, ffoip_server_address: event.target.value }))}
+                  placeholder="192.168.1.10:5050"
+                />
+              </div>
+              <div>
+                <label className="mb-1.5 block text-xs font-medium text-[var(--nv-text-tertiary)]">密钥（HMAC-SHA256）</label>
+                <Input
+                  type="password"
+                  value={sysSettings.ffoip_auth_secret}
+                  onChange={(event) => setSysSettings((s) => ({ ...s, ffoip_auth_secret: event.target.value }))}
+                  placeholder={sysSettings.ffoip_auth_secret === '__SET__' ? '已设置（保存新值以覆盖）' : '输入 ffoip client 鉴权密钥'}
+                  autoComplete="new-password"
+                />
+                {sysSettings.ffoip_auth_secret === '__SET__' && (
+                  <p className="mt-1 text-[11px] text-[var(--nv-text-faint)]">服务端已保存密钥，此处为脱敏显示；留空保存不会清除。</p>
+                )}
+              </div>
+            </div>
+          )}
+        </SettingRow>
+
+        <div className="grid gap-4 py-5 sm:grid-cols-3">
+          <NumberField
+            label="最大并发转码会话"
+            value={sysSettings.transcode_max_sessions}
+            min={1}
+            onChange={(value) => setSysSettings((s) => ({ ...s, transcode_max_sessions: value }))}
+          />
+          <NumberField
+            label="分段时长（秒）"
+            value={sysSettings.transcode_segment_duration}
+            min={1}
+            onChange={(value) => setSysSettings((s) => ({ ...s, transcode_segment_duration: value }))}
+          />
+          <NumberField
+            label="CRF（恒定质量基准）"
+            value={sysSettings.transcode_crf}
+            min={0}
+            max={51}
+            onChange={(value) => setSysSettings((s) => ({ ...s, transcode_crf: value }))}
+          />
+        </div>
+
+        <SettingRow
+          icon={<MonitorPlay size={16} />}
+          title="浏览器可播 HEVC"
+          description="允许在浏览器支持 HEVC 时与能力协商并存（不支持时仍转码）。"
+          control={(
+            <ToggleButton
+              checked={sysSettings.browser_hevc}
+              onChange={() => setSysSettings((s) => ({ ...s, browser_hevc: !s.browser_hevc }))}
+            />
+          )}
+        />
+
         <div className="border-t border-[var(--nv-border-subtle)] pt-4">
           {sysSettingsMsg && (
             <div className="mb-3">
@@ -381,6 +513,18 @@ export default function DashboardTab({
             {sysSettingsSaving ? '保存中...' : '保存设置'}
           </Button>
         </div>
+      </AdminPanel>
+
+      <AdminPanel
+        title="画质预设"
+        description="播放器画质菜单的共享档位表。保存即生效、无需重启；空列表表示使用内置默认。原画为固定档。"
+        icon={<MonitorPlay size={18} />}
+        bodyClassName="space-y-3"
+      >
+        <PresetManager
+          presets={sysSettings.quality_presets}
+          onChange={(presets) => setSysSettings((s) => ({ ...s, quality_presets: presets }))}
+        />
       </AdminPanel>
 
       <AdminPanel
@@ -726,5 +870,169 @@ function ToggleButton({ checked, onChange }: { checked: boolean; onChange: () =>
         style={{ transform: checked ? 'translateX(20px)' : 'translateX(2px)' }}
       />
     </button>
+  )
+}
+
+function NumberField({
+  label,
+  value,
+  min,
+  max,
+  onChange,
+}: {
+  label: string
+  value: number
+  min?: number
+  max?: number
+  onChange: (value: number) => void
+}) {
+  return (
+    <label className="block">
+      <span className="mb-1.5 block text-xs font-medium text-[var(--nv-text-tertiary)]">{label}</span>
+      <Input
+        type="number"
+        value={value}
+        min={min}
+        max={max}
+        onChange={(event) => onChange(Number(event.target.value))}
+      />
+    </label>
+  )
+}
+
+const PRESET_ID_RE = /^[A-Za-z0-9_-]+$/
+
+function makeOriginalPreset(): TranscodePreset {
+  return { id: 'original', name: '原画', width: 0, height: 0, bitrate: 0, audio_bitrate: 0, crf: 0, fixed: true }
+}
+
+function PresetManager({
+  presets,
+  onChange,
+}: {
+  presets: TranscodePreset[]
+  onChange: (presets: TranscodePreset[]) => void
+}) {
+  const original = presets.find((p) => p.id === 'original')
+  const customRows = presets.filter((p) => p.id !== 'original')
+  const usingBuiltin = presets.length === 0
+
+  const patchRow = (index: number, patch: Partial<TranscodePreset>) => {
+    const next = presets.map((row, i) => (i === index ? { ...row, ...patch } : row))
+    onChange(next)
+  }
+
+  const addRow = () => {
+    const base = original ? presets : [makeOriginalPreset(), ...customRows]
+    onChange([...base, { id: '', name: '', width: 1280, height: 720, bitrate: 1000, audio_bitrate: 128, crf: 0, fixed: false }])
+  }
+
+  const removeRow = (index: number) => {
+    onChange(presets.filter((_, i) => i !== index))
+  }
+
+  const idError = (id: string) => {
+    if (!id) return '档位ID 不能为空'
+    if (!PRESET_ID_RE.test(id)) return '只能字母/数字/下划线/短横'
+    const dup = presets.filter((p) => p.id === id).length > 1
+    if (dup) return '档位ID 重复'
+    return ''
+  }
+
+  return (
+    <div>
+      {usingBuiltin && (
+        <p className="mb-3 rounded-[var(--nv-radius-control)] border border-[var(--nv-border-subtle)] bg-[var(--nv-bg-surface-soft)] px-3 py-2 text-xs leading-5 text-[var(--nv-text-tertiary)]">
+          当前未自定义档位，使用服务端内置默认（原画 → 4K → 2K → 1080P → 720P → 640P）。点击「+ 添加档位」开始自定义，保存空列表可随时恢复内置。
+        </p>
+      )}
+
+      <div className="overflow-hidden rounded-[var(--nv-radius-control)] border border-[var(--nv-border-subtle)]">
+        <div className="overflow-x-auto">
+          <table className="w-full min-w-[640px] text-sm">
+            <thead className="bg-[var(--nv-bg-surface-soft)] text-left text-xs text-[var(--nv-text-tertiary)]">
+              <tr>
+                <th className="px-3 py-2.5 font-semibold">档位ID</th>
+                <th className="px-3 py-2.5 font-semibold">显示名</th>
+                <th className="px-3 py-2.5 font-semibold">目标宽度</th>
+                <th className="px-3 py-2.5 font-semibold">码率KBPS</th>
+                <th className="px-3 py-2.5" />
+              </tr>
+            </thead>
+            <tbody>
+              {/* 固定原画行 */}
+              <tr className="border-t border-[var(--nv-border-subtle)]">
+                <td className="px-3 py-2 font-mono text-xs text-[var(--nv-text-secondary)]">original</td>
+                <td className="px-3 py-2 text-[var(--nv-text-primary)]">原画（固定）</td>
+                <td className="px-3 py-2 text-xs text-[var(--nv-text-tertiary)]">0（不缩放）</td>
+                <td className="px-3 py-2 text-xs text-[var(--nv-text-tertiary)]">0（恒定质量）</td>
+                <td className="px-3 py-2" />
+              </tr>
+              {customRows.map((row, rowIndex) => {
+                const presetIndex = presets.findIndex((p) => p === row)
+                const err = idError(row.id)
+                return (
+                  <tr key={rowIndex} className="border-t border-[var(--nv-border-subtle)]">
+                    <td className="px-2 py-2">
+                      <Input
+                        value={row.id}
+                        invalid={Boolean(err)}
+                        onChange={(e) => patchRow(presetIndex, { id: e.target.value })}
+                        placeholder="e.g. 720p"
+                        className="font-mono text-xs"
+                      />
+                      {err && <p className="mt-1 text-[11px] text-[var(--nv-status-danger)]">{err}</p>}
+                    </td>
+                    <td className="px-2 py-2">
+                      <Input
+                        value={row.name}
+                        onChange={(e) => patchRow(presetIndex, { name: e.target.value })}
+                        placeholder="720P"
+                      />
+                    </td>
+                    <td className="px-2 py-2">
+                      <Input
+                        type="number"
+                        value={row.width}
+                        min={0}
+                        onChange={(e) => patchRow(presetIndex, { width: Number(e.target.value), height: Math.round((Number(e.target.value) * 9) / 16) })}
+                      />
+                      {row.width === 0 && <p className="mt-1 text-[11px] text-[var(--nv-text-faint)]">0=不缩放</p>}
+                    </td>
+                    <td className="px-2 py-2">
+                      <Input
+                        type="number"
+                        value={row.bitrate}
+                        min={0}
+                        onChange={(e) => patchRow(presetIndex, { bitrate: Number(e.target.value) })}
+                      />
+                      {row.bitrate === 0 && <p className="mt-1 text-[11px] text-[var(--nv-text-faint)]">0=恒定质量</p>}
+                    </td>
+                    <td className="px-2 py-2 text-right">
+                      <button
+                        type="button"
+                        onClick={() => removeRow(presetIndex)}
+                        className="rounded-[var(--nv-radius-control)] p-1.5 text-[var(--nv-text-tertiary)] transition-colors hover:bg-[var(--nv-bg-hover)] hover:text-[var(--nv-status-danger)]"
+                        aria-label="删除档位"
+                      >
+                        <Trash2 size={15} />
+                      </button>
+                    </td>
+                  </tr>
+                )
+              })}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <Button variant="secondary" size="sm" onClick={addRow}>
+        <Plus size={14} />
+        添加档位
+      </Button>
+      {original && presets.length > 0 && (
+        <p className="mt-2 text-[11px] text-[var(--nv-text-faint)]">高度随宽度按 16:9 自动派生（如 1280→720），无需单独填写。</p>
+      )}
+    </div>
   )
 }

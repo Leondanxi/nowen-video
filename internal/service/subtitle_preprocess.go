@@ -117,6 +117,21 @@ func (s *SubtitlePreprocessService) SetWSHub(hub *WSHub) {
 	s.wsHub = hub
 }
 
+// ffmpegBin / ffprobeBin 取配置中的可执行路径（§3.1）；未配置时回退 PATH 同名命令。
+func (s *SubtitlePreprocessService) ffmpegBin() string {
+	if s.cfg != nil && strings.TrimSpace(s.cfg.App.FFmpegPath) != "" {
+		return strings.TrimSpace(s.cfg.App.FFmpegPath)
+	}
+	return "ffmpeg"
+}
+
+func (s *SubtitlePreprocessService) ffprobeBin() string {
+	if s.cfg != nil && strings.TrimSpace(s.cfg.App.FFprobePath) != "" {
+		return strings.TrimSpace(s.cfg.App.FFprobePath)
+	}
+	return "ffprobe"
+}
+
 // ==================== 公开 API ====================
 
 // enqueueTask 将任务入队，如队列满则仅记录 inQueueIDs、等待 reconciler 后续拉起
@@ -914,7 +929,7 @@ func (s *SubtitlePreprocessService) extractBitmapSubtitleOCR(filePath string, tr
 		"-c:s", "copy",
 		"-y", supFilePath,
 	}
-	cmd := exec.Command("ffmpeg", exportArgs...)
+	cmd := exec.Command(s.ffmpegBin(), exportArgs...)
 	if output, err := cmd.CombinedOutput(); err != nil {
 		s.logger.Warnf("FFmpeg 导出图形字幕失败: %v, 输出: %s", err, string(output))
 		// 回退方案：尝试直接导出为图片序列
@@ -933,7 +948,7 @@ func (s *SubtitlePreprocessService) extractBitmapSubtitleOCR(filePath string, tr
 		"-y",
 		filepath.Join(imgDir, "sub_%06d.png"),
 	}
-	cmd = exec.Command("ffmpeg", imgArgs...)
+	cmd = exec.Command(s.ffmpegBin(), imgArgs...)
 	if output, err := cmd.CombinedOutput(); err != nil {
 		s.logger.Warnf("FFmpeg 导出字幕图片失败: %v, 输出: %s", err, string(output))
 		return s.extractBitmapSubtitleViaImages(filePath, track, tmpDir, tesseractBin, tesseractLang)
@@ -1007,7 +1022,7 @@ func (s *SubtitlePreprocessService) extractBitmapSubtitleViaImages(filePath stri
 		"-y",
 		filepath.Join(imgDir, "frame_%06d.png"),
 	}
-	cmd := exec.Command("ffmpeg", args...)
+	cmd := exec.Command(s.ffmpegBin(), args...)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return "", fmt.Errorf("FFmpeg 图形字幕导出失败: %v, 输出: %s", err, string(output))
@@ -1074,7 +1089,7 @@ func (s *SubtitlePreprocessService) extractSubtitleTimestamps(supFilePath string
 		"-of", "csv=p=0",
 		supFilePath,
 	}
-	cmd := exec.Command("ffprobe", args...)
+	cmd := exec.Command(s.ffprobeBin(), args...)
 	output, err := cmd.Output()
 	if err != nil {
 		return nil, fmt.Errorf("ffprobe 失败: %v", err)
@@ -1119,7 +1134,7 @@ func (s *SubtitlePreprocessService) extractSubtitleTimestampsFromVideo(filePath 
 		"-of", "csv=p=0",
 		filePath,
 	}
-	cmd := exec.Command("ffprobe", args...)
+	cmd := exec.Command(s.ffprobeBin(), args...)
 	output, err := cmd.Output()
 	if err != nil {
 		return nil, fmt.Errorf("ffprobe 失败: %v", err)

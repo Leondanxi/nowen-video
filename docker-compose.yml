@@ -10,6 +10,10 @@ services:
       #   - linux/amd64
       #   - linux/arm64
       #   - linux/arm/v7
+      # 可选：把 ffmpeg-over-ip 静态 client 内置进镜像（默认关闭）。
+      # 不加 --build-arg 时镜像不含 client，走 bind-mount 或纯本地 ffmpeg：
+      # args:
+      #   FFOIP_VERSION: "v5.2.1"
     # 如果在 x86 主机上拉取 ARM 镜像（或反之），可通过 platform 显式指定
     # platform: linux/arm64
     container_name: nowen-video
@@ -46,6 +50,18 @@ services:
       # 示例: 分别挂载不同媒体目录
       # - /volume1/Media/电影:/media/电影
       # - /volume1/Media/电视剧:/media/电视剧
+      # ---- ffmpeg-over-ip client（可选，把转码卸载到远程 GPU VM）----
+      # 只读 bind-mount 宿主机上的 ffmpeg-over-ip 静态 client 二进制。
+      # 同一个文件经 argv[0] 同时充当 ffmpeg 与 ffprobe，因此挂到两个路径。
+      # 先从 https://github.com/steelbrain/ffmpeg-over-ip/releases 下载与容器架构
+      # 匹配的 `linux-<amd64|arm64>-ffmpeg-over-ip-client.zip`，解压后：
+      #   chmod +x /opt/ffoip/ffmpeg-over-ip-client
+      # 然后取消下面两行注释（路径改成你宿主机上的实际位置）：
+      # - /opt/ffoip/ffmpeg-over-ip-client:/opt/ffoip/ffmpeg:ro
+      # - /opt/ffoip/ffmpeg-over-ip-client:/opt/ffoip/ffprobe:ro
+      # 说明：若镜像构建时已用 --build-arg FFOIP_VERSION 内置了 client，
+      # 则容器内 /opt/ffoip/ffmpeg 已存在，无需再 bind-mount。详见
+      # docs/ffmpeg-over-ip-deploy.md。
     # 硬件加速设备映射
     # - amd64 (Intel QSV/VAAPI): /dev/dri
     # - arm64 (树莓派 V4L2 / 瑞芯微 RKMPP / Mali GPU): /dev/dri, /dev/video*
@@ -81,6 +97,19 @@ services:
       - NOWEN_LOGGING_LEVEL=info
       # ---- CORS（多个用逗号分隔，留空禁止跨域，*允许所有） ----
       # - NOWEN_APP_CORS_ORIGINS=http://localhost:3000
+      # ---- ffmpeg-over-ip client 连接（可选；不要在本文件里写真地址/密钥）----
+      # 通过同目录 .env 文件注入。出站 TCP 必须能访问到 Windows GPU VM 的 5050 端口。
+      # .env 示例（不要提交到 git）：
+      #   FFOIP_SERVER_ADDRESS=192.168.1.50:5050
+      #   FFOIP_AUTH_SECRET=<你的强随机密钥，与 Windows server 端一致>
+      # 然后取消下面注释：
+      # - FFMPEG_OVER_IP_CLIENT_ADDRESS=${FFOIP_SERVER_ADDRESS}
+      # - FFMPEG_OVER_IP_CLIENT_AUTH_SECRET=${FFOIP_AUTH_SECRET}
+      # client 日志（可选；写到持久化卷便于 docker exec tail）：
+      # - FFMPEG_OVER_IP_CLIENT_LOG=/cache/ffmpeg-over-ip.client.log
+      # 默认强制硬件、不做静默 CPU 回退；仅当你希望 server 不可达时透明回退到
+      # 容器本地 ffmpeg 时才打开（与 nowen 的 gpu_fallback_cpu=false 互斥语义，谨慎）：
+      # - FFMPEG_OVER_IP_CLIENT_FALLBACK_TO_LOCAL=false
       - TZ=Asia/Shanghai
     restart: unless-stopped
     # 健康检查：给足启动时间，避免 ARM NAS 首次扫盘慢被误判不健康

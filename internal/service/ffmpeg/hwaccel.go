@@ -17,6 +17,7 @@ const (
 	HWAccelNVENC = "nvenc"
 	HWAccelQSV   = "qsv"
 	HWAccelVAAPI = "vaapi"
+	HWAccelAMF   = "amf"
 )
 
 // DetectHWAccel 检测可用的硬件加速方式。

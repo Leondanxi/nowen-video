@@ -1,14 +1,18 @@
 package handler
 
 import (
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/gin-gonic/gin"
 	"github.com/nowen-video/nowen-video/internal/model"
+	"github.com/nowen-video/nowen-video/internal/service"
+	transcodeprofile "github.com/nowen-video/nowen-video/internal/transcode/profile"
 )
 
 // ==================== 批量操作 ====================
@@ -173,19 +177,75 @@ func (h *AdminHandler) GetSystemSettings(c *gin.Context) {
 	// 返回带默认值的设置
 	settings := gin.H{
 		SettingGPUTranscode:     getBoolSetting(all, SettingGPUTranscode, true),
-		SettingGPUFallbackCPU:   getBoolSetting(all, SettingGPUFallbackCPU, true),
 		SettingMetadataPath:     getStrSetting(all, SettingMetadataPath, ""),
 		SettingPlayCachePath:    getStrSetting(all, SettingPlayCachePath, ""),
 		SettingDirectLink:       getBoolSetting(all, SettingDirectLink, false),
 		SettingAutoPreprocess:   getBoolSetting(all, SettingAutoPreprocess, false),  // 默认关闭：扫描后不自动预处理
 		SettingAutoTranscode:    getBoolSetting(all, SettingAutoTranscode, false),   // 默认关闭：播放时不自动转码
 		SettingPreferDirectPlay: getBoolSetting(all, SettingPreferDirectPlay, true), // 默认开启：优先直接播放
+
+		// ===== 软/硬件解码 + ffmpeg-over-ip（冻结规格 §3.1） =====
+		service.SettingKeyHWDecodeMode:      getStrSetting(all, service.SettingKeyHWDecodeMode, "auto"),
+		service.SettingKeyHWEncoder:         getStrSetting(all, service.SettingKeyHWEncoder, "auto"),
+		service.SettingKeyGPUFallbackCPU:    getBoolSetting(all, service.SettingKeyGPUFallbackCPU, false),
+		service.SettingKeyFFmpegPath:        getStrSetting(all, service.SettingKeyFFmpegPath, "ffmpeg"),
+		service.SettingKeyFFprobePath:       getStrSetting(all, service.SettingKeyFFprobePath, "ffprobe"),
+		service.SettingKeyFFOIPEnabled:      getBoolSetting(all, service.SettingKeyFFOIPEnabled, false),
+		service.SettingKeyFFOIPServerAddress: getStrSetting(all, service.SettingKeyFFOIPServerAddress, ""),
+		service.SettingKeyTranscodeMaxSess:  getIntSetting(all, service.SettingKeyTranscodeMaxSess, 6),
+		service.SettingKeyTranscodeSegDur:   getIntSetting(all, service.SettingKeyTranscodeSegDur, 6),
+		service.SettingKeyTranscodeCRF:      getIntSetting(all, service.SettingKeyTranscodeCRF, 18),
+		service.SettingKeyBrowserHEVC:       getBoolSetting(all, service.SettingKeyBrowserHEVC, true),
+		service.SettingKeyDefaultQuality:   getStrSetting(all, service.SettingKeyDefaultQuality, "auto"),
 	}
+
+	// ffoip_auth_secret 脱敏：未设返回 ""，已设返回 "__SET__"，绝不回传明文（§3.1）。
+	if secret := getStrSetting(all, service.SettingKeyFFOIPAuthSecret, ""); secret != "" {
+		settings[service.SettingKeyFFOIPAuthSecret] = "__SET__"
+	} else {
+		settings[service.SettingKeyFFOIPAuthSecret] = ""
+	}
+
+	// quality_presets：返回当前生效档位（覆盖或内置默认），供设置页编辑。
+	settings[service.SettingKeyQualityPresets] = presetDTOs(transcodeprofile.Effective())
 
 	c.JSON(http.StatusOK, gin.H{"data": settings})
 }
 
-// UpdateSystemSettingsRequest 更新系统设置请求
+// presetDTO 是对外/设置页共享的画质档位形状（冻结规格 §4 / §11.1）。
+type presetDTO struct {
+	ID           string `json:"id"`
+	Name         string `json:"name"`
+	Width        int    `json:"width"`
+	Height       int    `json:"height"`
+	Bitrate      int    `json:"bitrate"`
+	AudioBitrate int    `json:"audio_bitrate"`
+	CRF          int    `json:"crf"`
+	Fixed        bool   `json:"fixed"`
+}
+
+func presetDTOs(presets []transcodeprofile.Preset) []presetDTO {
+	out := make([]presetDTO, 0, len(presets))
+	for _, p := range presets {
+		name := p.DisplayName
+		if name == "" {
+			name = p.Name
+		}
+		out = append(out, presetDTO{
+			ID:           p.Name,
+			Name:         name,
+			Width:        p.Width,
+			Height:       p.Height,
+			Bitrate:      p.BitrateKbps,
+			AudioBitrate: p.AudioKbps,
+			CRF:          p.CRF,
+			Fixed:        p.Fixed,
+		})
+	}
+	return out
+}
+
+// UpdateSystemSettingsRequest 更新系统设置请求（指针式部分更新）
 type UpdateSystemSettingsRequest struct {
 	EnableGPUTranscode *bool   `json:"enable_gpu_transcode"`
 	GPUFallbackCPU     *bool   `json:"gpu_fallback_cpu"`
@@ -195,13 +255,29 @@ type UpdateSystemSettingsRequest struct {
 	AutoPreprocess     *bool   `json:"auto_preprocess_on_scan"`
 	AutoTranscode      *bool   `json:"auto_transcode_on_play"`
 	PreferDirectPlay   *bool   `json:"prefer_direct_play"`
+
+	// ===== 软/硬件解码 + ffmpeg-over-ip（§3.1，全部指针式部分更新） =====
+	HWDecodeMode      *string `json:"hw_decode_mode"`
+	HWEncoder         *string `json:"hw_encoder"`
+	FFmpegPath        *string `json:"ffmpeg_path"`
+	FFprobePath       *string `json:"ffprobe_path"`
+	FFOIPEnabled      *bool   `json:"ffoip_enabled"`
+	FFOIPServerAddr   *string `json:"ffoip_server_address"`
+	FFOIPAuthSecret   *string `json:"ffoip_auth_secret"` // 敏感；仅写库，不回显明文
+	TranscodeMaxSess  *int    `json:"transcode_max_sessions"`
+	TranscodeSegDur   *int    `json:"transcode_segment_duration"`
+	TranscodeCRF      *int    `json:"transcode_crf"`
+	BrowserHEVC       *bool   `json:"browser_hevc"`
+	DefaultQuality    *string `json:"default_quality_preset"`
+	// QualityPresets 指向 nil = 不更新；指向空数组 = 清空覆盖回内置；指向非空数组 = 热加载覆盖。
+	QualityPresets *[]presetDTO `json:"quality_presets"`
 }
 
 // UpdateSystemSettings 更新系统全局设置
 func (h *AdminHandler) UpdateSystemSettings(c *gin.Context) {
 	var req UpdateSystemSettingsRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "请求参数无效"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "请求参数无效: " + err.Error()})
 		return
 	}
 
@@ -231,6 +307,69 @@ func (h *AdminHandler) UpdateSystemSettings(c *gin.Context) {
 		kvs[SettingPreferDirectPlay] = boolToStr(*req.PreferDirectPlay)
 	}
 
+	// ===== §3.1 新增热设置 =====
+	if req.HWDecodeMode != nil {
+		kvs[service.SettingKeyHWDecodeMode] = strings.TrimSpace(*req.HWDecodeMode)
+	}
+	if req.HWEncoder != nil {
+		kvs[service.SettingKeyHWEncoder] = strings.TrimSpace(*req.HWEncoder)
+	}
+	if req.FFmpegPath != nil {
+		kvs[service.SettingKeyFFmpegPath] = strings.TrimSpace(*req.FFmpegPath)
+	}
+	if req.FFprobePath != nil {
+		kvs[service.SettingKeyFFprobePath] = strings.TrimSpace(*req.FFprobePath)
+	}
+	if req.FFOIPEnabled != nil {
+		kvs[service.SettingKeyFFOIPEnabled] = boolToStr(*req.FFOIPEnabled)
+	}
+	if req.FFOIPServerAddr != nil {
+		kvs[service.SettingKeyFFOIPServerAddress] = strings.TrimSpace(*req.FFOIPServerAddr)
+	}
+	// secret：仅在用户传入非空时更新（空串=不修改，避免误清空；清除需走专门路径）。
+	if req.FFOIPAuthSecret != nil && strings.TrimSpace(*req.FFOIPAuthSecret) != "" {
+		kvs[service.SettingKeyFFOIPAuthSecret] = strings.TrimSpace(*req.FFOIPAuthSecret)
+	}
+	if req.TranscodeMaxSess != nil {
+		kvs[service.SettingKeyTranscodeMaxSess] = strconv.Itoa(*req.TranscodeMaxSess)
+	}
+	if req.TranscodeSegDur != nil {
+		kvs[service.SettingKeyTranscodeSegDur] = strconv.Itoa(*req.TranscodeSegDur)
+	}
+	if req.TranscodeCRF != nil {
+		kvs[service.SettingKeyTranscodeCRF] = strconv.Itoa(*req.TranscodeCRF)
+	}
+	if req.BrowserHEVC != nil {
+		kvs[service.SettingKeyBrowserHEVC] = boolToStr(*req.BrowserHEVC)
+	}
+	if req.DefaultQuality != nil {
+		kvs[service.SettingKeyDefaultQuality] = strings.TrimSpace(*req.DefaultQuality)
+	}
+
+	// quality_presets：校验 + 原子热加载（空数组=清空覆盖回内置）。
+	if req.QualityPresets != nil {
+		presets := make([]transcodeprofile.Preset, 0, len(*req.QualityPresets))
+		for _, d := range *req.QualityPresets {
+			presets = append(presets, transcodeprofile.Preset{
+				Name:        d.ID,
+				DisplayName:  d.Name,
+				Width:       d.Width,
+				Height:      d.Height,
+				BitrateKbps: d.Bitrate,
+				AudioKbps:   d.AudioBitrate,
+				CRF:         d.CRF,
+				Fixed:       d.Fixed,
+			})
+		}
+		if err := transcodeprofile.SetOverrides(presets); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "画质档位校验失败: " + err.Error()})
+			return
+		}
+		// 持久化为 JSON（空数组 = 回退内置默认）。
+		raw, _ := json.Marshal(*req.QualityPresets)
+		kvs[service.SettingKeyQualityPresets] = string(raw)
+	}
+
 	if len(kvs) == 0 {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "未提供任何设置项"})
 		return
@@ -242,10 +381,38 @@ func (h *AdminHandler) UpdateSystemSettings(c *gin.Context) {
 		return
 	}
 
+	// §3.1：把 ffmpeg/ffprobe 路径同步到内存 *config.Config，使离线调用点立即生效。
+	h.syncFFmpegPaths(kvs)
+
 	h.logger.Info("系统设置已更新")
 
 	// 返回更新后的完整设置
 	h.GetSystemSettings(c)
+}
+
+// syncFFmpegPaths 把 PUT 到的 ffmpeg_path/ffprobe_path 同步进内存 cfg（§3.1）。
+func (h *AdminHandler) syncFFmpegPaths(kvs map[string]string) {
+	if h.cfg == nil {
+		return
+	}
+	if v, ok := kvs[service.SettingKeyFFmpegPath]; ok && v != "" {
+		h.cfg.App.FFmpegPath = v
+	}
+	if v, ok := kvs[service.SettingKeyFFprobePath]; ok && v != "" {
+		h.cfg.App.FFprobePath = v
+	}
+}
+
+func getIntSetting(m map[string]string, key string, defaultVal int) int {
+	v, ok := m[key]
+	if !ok || v == "" {
+		return defaultVal
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil {
+		return defaultVal
+	}
+	return n
 }
 
 // 辅助函数

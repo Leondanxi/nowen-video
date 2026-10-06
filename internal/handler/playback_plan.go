@@ -8,6 +8,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/nowen-video/nowen-video/internal/service"
+	transcodeprofile "github.com/nowen-video/nowen-video/internal/transcode/profile"
 	"go.uber.org/zap"
 )
 
@@ -54,6 +55,44 @@ func (h *PlaybackPlanHandler) GetInfo(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"data": PlannedMediaPlayInfo{
 		MediaPlayInfo: info,
 		PlaybackPlan:  plan,
+	}})
+}
+
+// QualityPresets 返回播放器画质菜单（§11.1）：{data:{default, presets}}。
+// presets 首项为虚拟"自动"档（id=auto，不是 preset 表中的一行）。
+func (h *PlaybackPlanHandler) QualityPresets(c *gin.Context) {
+	type presetItem struct {
+		ID           string `json:"id"`
+		Name         string `json:"name"`
+		Width        int    `json:"width"`
+		Height       int    `json:"height"`
+		Bitrate      int    `json:"bitrate"`
+		AudioBitrate int    `json:"audio_bitrate"`
+		CRF          int    `json:"crf"`
+		Fixed        bool   `json:"fixed"`
+	}
+	// 仅返回真实档位（original..640p）；虚拟「自动(auto)」档由前端置顶，
+	// 不在此列出（§11.1），否则会与前端自动项重复并污染自动 ABR 阶梯。
+	presets := []presetItem{}
+	for _, p := range transcodeprofile.Effective() {
+		name := p.DisplayName
+		if name == "" {
+			name = p.Name
+		}
+		presets = append(presets, presetItem{
+			ID:           p.Name,
+			Name:         name,
+			Width:        p.Width,
+			Height:       p.Height,
+			Bitrate:      p.BitrateKbps,
+			AudioBitrate: p.AudioKbps,
+			CRF:          p.CRF,
+			Fixed:        p.Fixed,
+		})
+	}
+	c.JSON(http.StatusOK, gin.H{"data": gin.H{
+		"default":  h.stream.DefaultQualityPreset(),
+		"presets":  presets,
 	}})
 }
 
@@ -129,6 +168,7 @@ func (h *PlaybackPlanHandler) clientCapabilities(c *gin.Context) service.Playbac
 	caps.MSEH264 = queryBool(c, "mse_h264", false)
 	caps.MSEHEVC = queryBool(c, "mse_hevc", false)
 	caps.Platform = strings.TrimSpace(c.Query("platform"))
+	caps.Quality = strings.TrimSpace(c.Query("quality"))
 
 	return caps
 }
