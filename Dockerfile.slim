@@ -9,34 +9,41 @@
 # 容器本身可以没有 GPU：把 NOWEN_TRANSCODE_HW_DECODE_MODE=hardware 与
 # NOWEN_TRANSCODE_HW_ENCODER=nvenc 传入，本体就会按硬件管线生成参数、绕过
 # "探测不到 GPU 即回退 CPU" 的逻辑，实际编解码在你挂载的客户端 / 远端 GPU 完成。
+#
+# 构建提速约定：
+#   - 镜像构建只产出 dist，直接 `vite build`；tsc 全量类型检查与 UI 审计是
+#     开发/CI 质量门，不放进镜像构建（本地用 `npm run build` 跑完整质量门）。
+#   - npm / Go 依赖与 Go 编译缓存走 BuildKit cache mount，重复构建显著加快。
 
-FROM --platform=$BUILDPLATFORM node:20-alpine AS frontend
-ARG NOWEN_VERSION=0.1.0
+FROM --platform=$BUILDPLATFORM node:22-alpine AS frontend
+ARG NOWEN_VERSION=0.3.0
 WORKDIR /app/web
 COPY web/package*.json ./
-RUN npm ci
+RUN --mount=type=cache,target=/root/.npm npm ci
 COPY web/ .
 ENV VITE_APP_VERSION=${NOWEN_VERSION}
-RUN npm run build
+RUN npx vite build
 
-FROM --platform=$BUILDPLATFORM golang:1.25-alpine AS backend
+FROM --platform=$BUILDPLATFORM golang:1.27-alpine AS backend
 ARG TARGETOS
 ARG TARGETARCH
-ARG NOWEN_VERSION=0.1.0
+ARG NOWEN_VERSION=0.3.0
 WORKDIR /app
 ENV GOPROXY=https://goproxy.cn,https://goproxy.io,direct
 COPY go.mod go.sum ./
-RUN go mod download
+RUN --mount=type=cache,target=/go/pkg/mod go mod download
 COPY . .
 COPY --from=frontend /app/web/dist ./web/dist
-RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
+RUN --mount=type=cache,target=/go/pkg/mod \
+    --mount=type=cache,target=/root/.cache/go-build \
+    CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
     go build -trimpath \
       -ldflags="-s -w -X github.com/nowen-video/nowen-video/internal/version.Version=${NOWEN_VERSION}" \
       -o nowen-video ./cmd/server-lite
 
 # ---- 运行时：只含本体，不含 ffmpeg / 硬件驱动 ----
 FROM alpine:3.24
-ARG NOWEN_VERSION=0.1.0
+ARG NOWEN_VERSION=0.3.0
 
 # 仅保留运行本体与入口脚本所需的最小依赖；不装 ffmpeg。
 RUN apk add --no-cache tzdata ca-certificates su-exec

@@ -2,6 +2,9 @@
 .gitignore
 *.exe
 *.apk
+# 根目录误跟踪的编译产物（约 60M），不进入构建上下文
+/server
+/server-lite
 *.log
 cache/
 data/
@@ -14,7 +17,7 @@ docker-compose.yml
 docker-compose.deploy.yml
 stderr.log
 stdout.log
-package-lock.json
+/package-lock.json
 Makefile
 
 # Python 番号刮削微服务：只排除运行时文件，保留源码

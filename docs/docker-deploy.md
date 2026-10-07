@@ -1,14 +1,14 @@
 # nowen-video Docker 部署指南
 
-本 Fork 在原版基础上增加了：**软/硬件解码与硬件加速可手动/强制选择**、**播放器画质档位与自动清晰度**。
+本 Fork 在原版基础上增加了：**软/硬件解码与硬件加速可手动/强制选择**、**播放器画质档位与自动清晰度**；并在 **v0.3.0** 完成**依赖安全升级与构建提速**。
 
-> ⚠️ 关键前提：这些改造只存在于本 Fork 的功能分支 `feat/hwaccel-quality`（PR #1）。
+> ⚠️ 关键前提：这些改造只存在于本 Fork。
 > **任何包含改造代码的镜像都必须从本 Fork 构建**；直接 `docker pull cropflre/nowen-video:latest` 拉到的是**上游原版、不含改造代码**。
 
 本指南提供两种形态：
 
-- **形态 A（本指南首选，适配你的 AIO）**：纯“本体”镜像，**不含 ffmpeg**，运行时挂载你自己已装好的 ffmpeg / ffprobe（或远程转码 client），强制 NVENC。
-- **形态 B（可选）**：内置 ffmpeg 的全功能镜像（同样从本 Fork 构建才含改造代码），适合容器主机本地就有 GPU 的场景。
+- **形态 A（首选，适配你的 AIO）**：纯“本体”镜像，**不含 ffmpeg**，运行时挂载你自己已装好的 ffmpeg / ffprobe（或远程转码 client），强制 NVENC。
+- **形态 B（可选）**：内置 ffmpeg 的全功能镜像（同样需从本 Fork 构建才含改造代码），适合容器主机本地就有 GPU 的场景。
 
 ---
 
@@ -18,7 +18,7 @@
 
 ### A.1 一键（compose，推荐）
 
-仓库已提供 `docker-compose.app.yml`。在仓库根目录（`feat/hwaccel-quality` 分支）执行：
+仓库已提供 `docker-compose.app.yml`。在仓库根目录执行：
 
 ```bash
 docker compose -f docker-compose.app.yml up -d --build
@@ -32,10 +32,13 @@ docker compose -f docker-compose.app.yml logs -f
 ### A.2 免 clone，直接从 GitHub 一键构建本体镜像
 
 ```bash
-# 一条命令直接从本 Fork 的功能分支构建（无需先 git clone）
+# 一条命令直接从本 Fork 的 v0.3.0 标签构建（无需先 git clone）
 docker build -f Dockerfile.slim -t nowen-video:app \
-  https://github.com/Leondanxi/nowen-video.git#feat/hwaccel-quality
+  https://github.com/Leondanxi/nowen-video.git#v0.3.0
 ```
+
+> 网络访问 GitHub 困难时，改用随 Release 一起发布的源码压缩包：解压后在根目录执行
+> `docker build -f Dockerfile.slim -t nowen-video:app .`，效果相同。
 
 ### A.3 等价 docker build + docker run
 
@@ -88,9 +91,9 @@ docker run -d \
 适合容器主机本地就有 GPU、希望镜像自带 ffmpeg 的情况。注意仍需**从本 Fork 构建**才含改造代码：
 
 ```bash
-# 从本 Fork 功能分支用官方 Dockerfile（内置 ffmpeg + 硬解驱动）构建
+# 从本 Fork v0.3.0 用官方 Dockerfile（内置 ffmpeg + 硬解驱动）构建
 docker build -f Dockerfile -t nowen-video:full \
-  https://github.com/Leondanxi/nowen-video.git#feat/hwaccel-quality
+  https://github.com/Leondanxi/nowen-video.git#v0.3.0
 
 # NVIDIA 主机需先装好 nvidia-container-toolkit，并使用 --gpus all 运行：
 docker run -d --name nowen-video --restart unless-stopped \
@@ -108,6 +111,21 @@ docker run -d --name nowen-video --restart unless-stopped \
 
 ---
 
+## 安全升级与构建提速（v0.3.0）
+
+**安全**
+- Go：`govulncheck` 复扫 **0 个可被调用漏洞**；构建工具链升到 Go 1.27（含标准库 crypto/x509 修复），x/net、x/crypto、x/text、protobuf、jwt、gin 等全部升到当前最新。
+- 前端运行时依赖：axios（SSRF / 原型污染等高危）、react-router（开放重定向）已修复。
+- 代码审计：ffmpeg 命令以参数切片执行、不经 shell（无命令注入）；设置接口需 JWT + 管理员；生成的 m3u8 段路径与自定义档位 ID 均有白名单/目录穿越校验。
+- 剩余少量 npm 报告项（braces / esbuild / postcss-selector-parser）**全部是构建期 dev 依赖、不打包进 dist、生产应用零暴露**；其修复要求跨 tailwind 4 / vite 8 大版本（配置大重写、易引入视觉回归），故当前版本不跨，后续可单独评估。
+
+**构建提速（为什么比 v0.2.0 快）**
+- 镜像构建直接 `vite build`，跳过 `tsc -b` 全量类型检查与两个 UI 审计脚本（这些是开发/CI 质量门，本地 `npm run build` 仍会跑）。
+- npm 依赖、Go module、Go 编译缓存均走 BuildKit cache mount，二次构建命中缓存。
+- 构建基础镜像升到 node:22 / golang:1.27；`.dockerignore` 排除根目录约 60M 的编译二进制，构建上下文更小。
+
+---
+
 ## 环境变量速查
 
 | 变量 | 默认 | 说明 |
@@ -119,9 +137,9 @@ docker run -d --name nowen-video --restart unless-stopped \
 | `NOWEN_LOGGING_LEVEL` | `info` | 日志级别 |
 | `NOWEN_TRANSCODE_HW_DECODE_MODE` | `auto` | `auto` / `software` / `hardware`（强制硬件） |
 | `NOWEN_TRANSCODE_HW_ENCODER` | `auto` | `nvenc` / `qsv` / `vaapi` / `amf` |
-| `NOWEN_APP_FFMPEG_PATH` | `ffmpeg`（PATH 内） | 自定义 ffmpeg 路径（形态 A 已默认 `/ffmpeg/ffmpeg`） |
-| `NOWEN_APP_FFPROBE_PATH` | `ffprobe`（PATH 内） | 自定义 ffprobe 路径（形态 A 已默认 `/ffmpeg/ffprobe`） |
-| `PUID` / `PGID` / `UMASK` | `0`/`0`/`000` | 运行属主/权限（0 = root） |
+| `NOWEN_APP_FFMPEG_PATH` | `ffmpeg`（PATH 内） | 自定义 ffmpeg 路径（形态 A 默认 `/ffmpeg/ffmpeg`） |
+| `NOWEN_APP_FFPROBE_PATH` | `ffprobe`（PATH 内） | 自定义 ffprobe 路径（形态 A 默认 `/ffmpeg/ffprobe`） |
+| `PUID` / `PGID` / UMASK | `0`/`0`/`000` | 运行属主/权限（0 = root） |
 | `TZ` | `Asia/Shanghai` | 时区 |
 
 ---

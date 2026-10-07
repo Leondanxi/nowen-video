@@ -112,12 +112,7 @@ export default function App() {
             right: 'max(12px, env(safe-area-inset-right, 0px))',
           }}
         />
-        <BrowserRouter
-          future={{
-            v7_startTransition: true,
-            v7_relativeSplatPath: true,
-          }}
-        >
+        <BrowserRouter>
           <ServerProfileLoader />
           <CapabilityAdminGuard />
           <DesktopServerPicker />
