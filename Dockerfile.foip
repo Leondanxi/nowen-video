@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1.6
-# Nowen Video —— ffmpeg-over-ip 远端 GPU 转码镜像
+# Nowen Video —— ffmpeg-over-ip 远端 GPU 转码镜像（离线友好版）
 #
 # 镜像内容：nowen 本体 + ffmpeg-over-ip 客户端（静态 Go 二进制，以
 #   /usr/local/bin/ffmpeg 与 /usr/local/bin/ffprobe 两个软链形式存在）。
@@ -7,41 +7,42 @@
 # 通过 TCP 转发到「带 GPU 的 ffmpeg-over-ip 服务端」（如你直通了
 # RTX 2070 Super 的 Windows VM），文件 I/O 经连接回传，服务端不落盘。
 #
+# 构建期已尽量不依赖 GitHub：
+#   - ffmpeg-over-ip 客户端已随源码包内置（third_party/，linux-amd64）；
+#   - Go 依赖走 goproxy.cn；前端依赖走 npmmirror 国内镜像。
+#   仍需从 Docker Hub 拉取基础镜像（alpine / node / golang）。
+#
 # 运行时必须配置（compose 已设好）：
 #   FFMPEG_OVER_IP_CLIENT_ADDRESS= <GPU主机IP>:5050
 #   FFMPEG_OVER_IP_CLIENT_AUTH_SECRET= <与服务端一致的密钥>
 #   NOWEN_TRANSCODE_HW_DECODE_MODE=hardware
 #   NOWEN_TRANSCODE_HW_ENCODER=nvenc
-#
-# 服务端部署见 deploy/ffmpeg-over-ip-server/ 目录。
 
-# ---------- 1) 拉取 ffmpeg-over-ip 静态客户端 ----------
+# ---------- 1) 内置 ffmpeg-over-ip 静态客户端（随源码包提供，无需联网下载）----------
 FROM alpine:3.24 AS foip-client
 ARG TARGETARCH
-RUN apk add --no-cache curl unzip ca-certificates
-RUN arch="$TARGETARCH"; \
-    case "$arch" in amd64) fa=amd64 ;; arm64) fa=arm64 ;; *) echo "unsupported arch: $arch" >&2; exit 1 ;; esac; \
-    curl -fsSL -o /tmp/client.zip \
-      "https://github.com/steelbrain/ffmpeg-over-ip/releases/latest/download/linux-${fa}-ffmpeg-over-ip-client.zip"; \
-    unzip -o -q /tmp/client.zip -d /tmp/client; \
-    bin="$(find /tmp/client -type f -name ffmpeg-over-ip-client | head -1)"; \
-    test -n "$bin" && install -m 0755 "$bin" /usr/local/bin/ffmpeg-over-ip-client
+COPY third_party/ffmpeg-over-ip/ffmpeg-over-ip-client-linux-amd64 /tmp/ffmpeg-over-ip-client
+RUN case "$TARGETARCH" in \
+      amd64) install -m 0755 /tmp/ffmpeg-over-ip-client /usr/local/bin/ffmpeg-over-ip-client ;; \
+      *) echo "本离线包仅内置 linux-amd64 客户端，当前架构=$TARGETARCH 不支持" >&2; exit 1 ;; \
+    esac
 
-# ---------- 2) 前端 ----------
+# ---------- 2) 前端（国内 npm 镜像，避免访问 npm 官方慢）----------
 FROM --platform=$BUILDPLATFORM node:22-alpine AS frontend
-ARG NOWEN_VERSION=0.4.0
+ARG NOWEN_VERSION=0.4.1
 WORKDIR /app/web
 COPY web/package*.json ./
-RUN --mount=type=cache,target=/root/.npm npm ci
+RUN --mount=type=cache,target=/root/.npm \
+    npm ci --registry=https://registry.npmmirror.com
 COPY web/ .
 ENV VITE_APP_VERSION=${NOWEN_VERSION}
 RUN npx vite build
 
-# ---------- 3) 后端 ----------
+# ---------- 3) 后端（Go 依赖走 goproxy.cn）----------
 FROM --platform=$BUILDPLATFORM golang:1.27-alpine AS backend
 ARG TARGETOS
 ARG TARGETARCH
-ARG NOWEN_VERSION=0.4.0
+ARG NOWEN_VERSION=0.4.1
 WORKDIR /app
 ENV GOPROXY=https://goproxy.cn,https://goproxy.io,direct
 COPY go.mod go.sum ./
@@ -55,9 +56,9 @@ RUN --mount=type=cache,target=/go/pkg/mod \
       -ldflags="-s -w -X github.com/nowen-video/nowen-video/internal/version.Version=${NOWEN_VERSION}" \
       -o nowen-video ./cmd/server-lite
 
-# ---------- 4) 运行时：本体 + ffmpeg-over-ip 客户端（无 ffmpeg/无 GPU） ----------
+# ---------- 4) 运行时：本体 + ffmpeg-over-ip 客户端（无 ffmpeg/无 GPU）----------
 FROM alpine:3.24
-ARG NOWEN_VERSION=0.4.0
+ARG NOWEN_VERSION=0.4.1
 
 RUN apk add --no-cache tzdata ca-certificates su-exec
 RUN addgroup -S nowen && adduser -S nowen -G nowen
@@ -91,11 +92,9 @@ ENV NOWEN_APP_FFMPEG_PATH=/usr/local/bin/ffmpeg
 ENV NOWEN_APP_FFPROBE_PATH=/usr/local/bin/ffprobe
 
 # —— ffmpeg-over-ip 客户端连接参数（运行时由 compose / -e 覆盖）——
-# 服务端地址（GPU 主机）：必须填；   密钥：必须与服务端一致。
 ENV FFMPEG_OVER_IP_CLIENT_ADDRESS=192.168.1.100:5050
 ENV FFMPEG_OVER_IP_CLIENT_AUTH_SECRET=change-me
-# 服务端连不上时是否回退本机 ffmpeg：容器内没有 ffmpeg，保持 false，
-# 让问题显式暴露，而不是静默退化。
+# 容器内没有 ffmpeg，保持 false：服务端连不上时显式报错，不静默退化。
 ENV FFMPEG_OVER_IP_CLIENT_FALLBACK_TO_LOCAL=false
 
 # —— 强制硬件管线：容器无 GPU 也不回退 CPU，实际编解码在远端 GPU 完成 ——
