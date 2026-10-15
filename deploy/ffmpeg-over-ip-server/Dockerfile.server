@@ -1,0 +1,32 @@
+# syntax=docker/dockerfile:1.6
+# ffmpeg-over-ip 服务端（GPU 主机 / Linux）——可选，仅当你在 Linux 上跑服务端。
+# 你当前的 2070 Super 直通给 Windows VM 时，请优先用 README 的 Windows 安装方式。
+#
+# 镜像内含 ffmpeg-over-ip-server + Jellyfin-ffmpeg（ffmpeg/ffprobe，已编译
+# nvenc/nvdec/cuda）。CUDA 运行时用 nvidia/cuda 基镜像，宿主机 NVIDIA 驱动
+# 由 `--gpus all`（nvidia-container-toolkit）注入。
+#
+# 构建： docker compose -f deploy/ffmpeg-over-ip-server/docker-compose.yml build
+# 运行： docker compose -f deploy/ffmpeg-over-ip-server/docker-compose.yml up -d
+FROM nvidia/cuda:12.4.1-runtime-ubuntu22.04
+
+ARG TARGETARCH
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      ca-certificates curl unzip tzdata \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN case "$TARGETARCH" in amd64) fa=amd64 ;; arm64) fa=arm64 ;; *) fa=amd64 ;; esac; \
+    mkdir -p /opt/foip && cd /opt/foip && \
+    curl -fsSL -o /tmp/server.zip \
+      "https://github.com/steelbrain/ffmpeg-over-ip/releases/latest/download/linux-${fa}-ffmpeg-over-ip-server.zip" && \
+    unzip -o -q /tmp/server.zip -d /opt/foip && \
+    chmod +x /opt/foip/ffmpeg-over-ip-server /opt/foip/ffmpeg /opt/foip/ffprobe
+
+WORKDIR /opt/foip
+ENV FFMPEG_OVER_IP_SERVER_ADDRESS=0.0.0.0:5050
+ENV FFMPEG_OVER_IP_SERVER_AUTH_SECRET=change-me
+ENV FFMPEG_OVER_IP_SERVER_LOG=stdout
+ENV FFMPEG_OVER_IP_SERVER_DEBUG=true
+EXPOSE 5050
+# 服务端在自己所在目录查找 ffmpeg/ffprobe（已在 /opt/foip）。
+CMD ["/opt/foip/ffmpeg-over-ip-server"]

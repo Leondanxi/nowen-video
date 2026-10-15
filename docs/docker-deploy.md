@@ -1,128 +1,102 @@
 # nowen-video Docker 部署指南
 
-本 Fork 在原版基础上增加了：**软/硬件解码与硬件加速可手动/强制选择**、**播放器画质档位与自动清晰度**；并在 **v0.3.0** 完成**依赖安全升级与构建提速**。
+本 Fork 在原版基础上增加了：**软/硬件解码与硬件加速可手动/强制选择**、**播放器画质档位与自动清晰度**；
+**v0.4.0** 起内置 **ffmpeg-over-ip 客户端**，支持「nowen 容器无 GPU、转码在另一台 GPU 主机执行」的远端 GPU 方案，并修复了 v0.3.0 在 alpine 容器里挂载宿主 ffmpeg 导致的 **HTTP 500**。
 
-> ⚠️ 关键前提：这些改造只存在于本 Fork。
-> **任何包含改造代码的镜像都必须从本 Fork 构建**；直接 `docker pull cropflre/nowen-video:latest` 拉到的是**上游原版、不含改造代码**。
-
-本指南提供两种形态：
-
-- **形态 A（首选，适配你的 AIO）**：纯“本体”镜像，**不含 ffmpeg**，运行时挂载你自己已装好的 ffmpeg / ffprobe（或远程转码 client），强制 NVENC。
-- **形态 B（可选）**：内置 ffmpeg 的全功能镜像（同样需从本 Fork 构建才含改造代码），适合容器主机本地就有 GPU 的场景。
+> ⚠️ 关键前提：这些改造只存在于本 Fork（`github.com/Leondanxi/nowen-video`）。
+> 任何包含改造代码的镜像都必须从本 Fork 构建；直接 `docker pull cropflre/nowen-video:latest` 拉到的是**上游原版**。
 
 ---
 
-## 形态 A：纯本体镜像 + 自备 ffmpeg（推荐）
+## 形态一：远端 GPU（推荐，适配你的 AIO + Windows 显卡直通）
 
-适用：容器所在 CT/主机没有本地显卡，ffmpeg 由你准备（例如通过内网调用 Windows VM 上 RTX 2070 Super NVENC 的 client）。
+**架构**：CT/Docker 里跑 nowen（无 GPU），内置 ffmpeg-over-ip 客户端；
+直通显卡的 Windows VM 里跑 ffmpeg-over-ip 服务端；所有 ffmpeg/ffprobe 调用经内网 TCP 转发到 GPU 主机，文件经连接回传、服务端不落盘。
 
-### A.1 一键（compose，推荐）
-
-仓库已提供 `docker-compose.app.yml`。在仓库根目录执行：
-
-```bash
-docker compose -f docker-compose.app.yml up -d --build
-docker compose -f docker-compose.app.yml logs -f
+```
+Docker（无 GPU）：nowen + ffmpeg-over-ip 客户端  ──TCP 5050──▶  Windows VM：ffmpeg-over-ip 服务端 ──▶ RTX 2070 Super (NVENC)
 ```
 
-启动前**只需改一处**：把 `docker-compose.app.yml` 里 ffmpeg / ffprobe 卷挂载**冒号左边**改成你宿主机上真实的二进制路径（默认占位是 `/usr/bin/ffmpeg`、`/usr/bin/ffprobe`），媒体目录那行左边同理。
+### 第 1 步：在 GPU 主机部署服务端
 
-浏览器打开 `http://<host>:8080`，**第一个注册的账号自动成为管理员**。
+Windows（你的场景）：以管理员打开 PowerShell，执行仓库内脚本（或用官方 `irm https://ffmpeg-over-ip.com/install-server.ps1 | iex`）：
 
-### A.2 免 clone，直接从 GitHub 一键构建本体镜像
-
-```bash
-# 一条命令直接从本 Fork 的 v0.3.0 标签构建（无需先 git clone）
-docker build -f Dockerfile.slim -t nowen-video:app \
-  https://github.com/Leondanxi/nowen-video.git#v0.3.0
+```powershell
+.\deploy\ffmpeg-over-ip-server\install-server-windows.ps1 -AuthSecret "你的长随机密钥" -Port 5050
 ```
 
-> 网络访问 GitHub 困难时，改用随 Release 一起发布的源码压缩包：解压后在根目录执行
-> `docker build -f Dockerfile.slim -t nowen-video:app .`，效果相同。
+自检：`.\ffmpeg.exe -hide_banner -encoders | findstr nvenc` 应列出 `h264_nvenc/hevc_nvenc/av1_nvenc`。
+完整说明（含 Linux 服务端、防火墙、验证）见 [`deploy/ffmpeg-over-ip-server/README.md`](../deploy/ffmpeg-over-ip-server/README.md)。
 
-### A.3 等价 docker build + docker run
+### 第 2 步：改两处配置，一键启动 nowen
+
+编辑 `docker-compose.foip.yml`：
+
+1. `FFMPEG_OVER_IP_CLIENT_ADDRESS=192.168.1.100:5050` → 改成 Windows VM 的内网 IP；
+2. `FFMPEG_OVER_IP_CLIENT_AUTH_SECRET=change-me` → 改成与服务端一致的密钥；
+3. 媒体挂载那行左边 `/volume1/Media` 改成你 CT 里的媒体目录。
+
+然后：
 
 ```bash
-# 1) 在仓库根目录构建本体镜像
-docker build -f Dockerfile.slim -t nowen-video:app .
-
-# 2) 运行（注意把 ffmpeg/ffprobe/媒体 的宿主机路径改成你的实际路径）
-docker run -d \
-  --name nowen-video \
-  --restart unless-stopped \
-  -p 8080:8080 \
-  -e PUID=0 -e PGID=0 -e UMASK=000 \
-  -e TZ=Asia/Shanghai \
-  -e NOWEN_APP_PORT=8080 \
-  -e NOWEN_APP_DATA_DIR=/data \
-  -e NOWEN_APP_WEB_DIR=/app/web/dist \
-  -e NOWEN_DATABASE_DB_PATH=/data/nowen.db \
-  -e NOWEN_CACHE_CACHE_DIR=/cache \
-  -e NOWEN_LOGGING_LEVEL=info \
-  -e NOWEN_TRANSCODE_HW_DECODE_MODE=hardware \
-  -e NOWEN_TRANSCODE_HW_ENCODER=nvenc \
-  -e NOWEN_APP_FFMPEG_PATH=/ffmpeg/ffmpeg \
-  -e NOWEN_APP_FFPROBE_PATH=/ffmpeg/ffprobe \
-  -v ./data:/data \
-  -v ./cache:/cache \
-  -v /volume1/Media:/media:ro \
-  -v /usr/bin/ffmpeg:/ffmpeg/ffmpeg:ro \
-  -v /usr/bin/ffprobe:/ffmpeg/ffprobe:ro \
-  nowen-video:app
+docker compose -f docker-compose.foip.yml up -d --build
+docker compose -f docker-compose.foip.yml logs -f
 ```
 
-> 本机无显卡、走远端 GPU：**不要**加 `--device /dev/dri`（容器内没有该节点），但**保留**
-> `NOWEN_TRANSCODE_HW_DECODE_MODE=hardware` 与 `NOWEN_TRANSCODE_HW_ENCODER=nvenc`。
-> 本体将按硬解参数生成、绕过 CPU 回退，实际编解码在远端 GPU 完成。
+浏览器打开 `http://<host>:8080`，默认管理员 **admin / admin123**（首次登录强制改密）。
 
-### A.4 自备 ffmpeg 挂载说明
-
-- 挂载点与环境变量要**成对**出现：
-  - 卷：`-v <宿主机ffmpeg>:/ffmpeg/ffmpeg:ro`
-  - 环境变量：`NOWEN_APP_FFMPEG_PATH=/ffmpeg/ffmpeg`（ffprobe 同理）。
-- 路径生效优先级：后台「设置 → 转码」里的热设置 `ffmpeg_path/ffprobe_path` ＞ 环境变量 ＞ 默认。
-- 若挂载的是**动态链接**的标准 ffmpeg，启动时报缺共享库，请改用**静态编译版本 / 单文件 client**，或额外挂载其依赖库目录（可用 `ldd $(which ffmpeg)` 查看依赖）。
-- 若你的 ffmpeg client 自身需要 server 地址、端口、密钥等，直接在 `docker run` / compose 的 `environment` 里追加该 client 自己的变量即可——nowen 启动的子进程会继承容器全部环境变量，本体不对任何远程方案做专门集成（也不内置任何远程转码组件）。
-
----
-
-## 形态 B：内置 ffmpeg 的全功能镜像（可选）
-
-适合容器主机本地就有 GPU、希望镜像自带 ffmpeg 的情况。注意仍需**从本 Fork 构建**才含改造代码：
+> 等价的 `docker run`：
 
 ```bash
-# 从本 Fork v0.3.0 用官方 Dockerfile（内置 ffmpeg + 硬解驱动）构建
-docker build -f Dockerfile -t nowen-video:full \
-  https://github.com/Leondanxi/nowen-video.git#v0.3.0
-
-# NVIDIA 主机需先装好 nvidia-container-toolkit，并使用 --gpus all 运行：
+docker build -f Dockerfile.foip -t nowen-video:foip .
 docker run -d --name nowen-video --restart unless-stopped \
-  --gpus all \
-  -p 8080:8080 \
+  -p 8080:8080 -e TZ=Asia/Shanghai \
+  -e FFMPEG_OVER_IP_CLIENT_ADDRESS=192.168.1.100:5050 \
+  -e FFMPEG_OVER_IP_CLIENT_AUTH_SECRET=你的密钥 \
   -e NOWEN_TRANSCODE_HW_DECODE_MODE=hardware \
   -e NOWEN_TRANSCODE_HW_ENCODER=nvenc \
-  -v ./data:/data -v ./cache:/cache \
+  -v "$PWD/data:/data" -v "$PWD/cache:/cache" \
+  -v /volume1/Media:/media:ro \
+  nowen-video:foip
+```
+
+### 为什么 v0.3.0 会 HTTP 500、v0.4.0 如何修复
+
+v0.3.0 的精简镜像**不含 ffmpeg**，要求把宿主 ffmpeg 挂进 alpine(musl) 容器；宿主若是常见的 glibc 版 ffmpeg，
+其动态链接器在 musl 容器里无法执行 → 扫描/播放时 ffprobe/ffmpeg 启动失败 → **接口 500**。
+
+v0.4.0 直接内置 ffmpeg-over-ip 官方**静态编译**的客户端（`ffmpeg-over-ip-client`，仅约 3MB），
+并以 `ffmpeg` / `ffprobe` 两个软链形式放在 PATH 中。静态二进制不依赖 glibc/musl，在 alpine 里即可运行，
+**无需再挂载任何宿主 ffmpeg，也不依赖 CT 里有没有显卡**。
+
+---
+
+## 形态二：本机 GPU（容器主机本地就有显卡）
+
+适合 nowen 与 GPU 在同一台机器。用官方全功能镜像（含 ffmpeg + 驱动），NVIDIA 需装好 nvidia-container-toolkit：
+
+```bash
+docker build -f Dockerfile -t nowen-video:full .
+docker run -d --name nowen-video --restart unless-stopped \
+  --gpus all -p 8080:8080 \
+  -e NOWEN_TRANSCODE_HW_DECODE_MODE=hardware -e NOWEN_TRANSCODE_HW_ENCODER=nvenc \
+  -v "$PWD/data:/data" -v "$PWD/cache:/cache" \
   -v /volume1/Media:/media:ro \
   nowen-video:full
 ```
 
-> Intel QSV / VAAPI 主机：用 `-e NOWEN_TRANSCODE_HW_ENCODER=qsv`（或 `vaapi`）并映射 `-v /dev/dri:/dev/dri`（实际设备名以宿主机为准）。
-> 纯 CPU、无 GPU：`-e NOWEN_TRANSCODE_HW_DECODE_MODE=software`，去掉 GPU 相关参数。
+Intel QSV/VAAPI：`-e NOWEN_TRANSCODE_HW_ENCODER=qsv`（或 `vaapi`）并映射 `-v /dev/dri:/dev/dri`；
+纯 CPU：`-e NOWEN_TRANSCODE_HW_DECODE_MODE=software`，去掉 GPU 参数。
 
 ---
 
-## 安全升级与构建提速（v0.3.0）
+## 形态三：自备 ffmpeg（高级，`Dockerfile.slim`）
 
-**安全**
-- Go：`govulncheck` 复扫 **0 个可被调用漏洞**；构建工具链升到 Go 1.27（含标准库 crypto/x509 修复），x/net、x/crypto、x/text、protobuf、jwt、gin 等全部升到当前最新。
-- 前端运行时依赖：axios（SSRF / 原型污染等高危）、react-router（开放重定向）已修复。
-- 代码审计：ffmpeg 命令以参数切片执行、不经 shell（无命令注入）；设置接口需 JWT + 管理员；生成的 m3u8 段路径与自定义档位 ID 均有白名单/目录穿越校验。
-- 剩余少量 npm 报告项（braces / esbuild / postcss-selector-parser）**全部是构建期 dev 依赖、不打包进 dist、生产应用零暴露**；其修复要求跨 tailwind 4 / vite 8 大版本（配置大重写、易引入视觉回归），故当前版本不跨，后续可单独评估。
+仅当你确有自己的 ffmpeg 且**确认它是静态/兼容 musl 的二进制**时使用。⚠️ 直接挂载 glibc 动态 ffmpeg 到 alpine 正是 v0.3.0 的 500 根因，普通用户请直接用形态一。
 
-**构建提速（为什么比 v0.2.0 快）**
-- 镜像构建直接 `vite build`，跳过 `tsc -b` 全量类型检查与两个 UI 审计脚本（这些是开发/CI 质量门，本地 `npm run build` 仍会跑）。
-- npm 依赖、Go module、Go 编译缓存均走 BuildKit cache mount，二次构建命中缓存。
-- 构建基础镜像升到 node:22 / golang:1.27；`.dockerignore` 排除根目录约 60M 的编译二进制，构建上下文更小。
+```bash
+docker compose -f docker-compose.app.yml up -d --build   # 记得把 ffmpeg/ffprobe 卷挂载改成你自己的静态二进制
+```
 
 ---
 
@@ -137,26 +111,28 @@ docker run -d --name nowen-video --restart unless-stopped \
 | `NOWEN_LOGGING_LEVEL` | `info` | 日志级别 |
 | `NOWEN_TRANSCODE_HW_DECODE_MODE` | `auto` | `auto` / `software` / `hardware`（强制硬件） |
 | `NOWEN_TRANSCODE_HW_ENCODER` | `auto` | `nvenc` / `qsv` / `vaapi` / `amf` |
-| `NOWEN_APP_FFMPEG_PATH` | `ffmpeg`（PATH 内） | 自定义 ffmpeg 路径（形态 A 默认 `/ffmpeg/ffmpeg`） |
-| `NOWEN_APP_FFPROBE_PATH` | `ffprobe`（PATH 内） | 自定义 ffprobe 路径（形态 A 默认 `/ffmpeg/ffprobe`） |
-| `PUID` / `PGID` / UMASK | `0`/`0`/`000` | 运行属主/权限（0 = root） |
+| `NOWEN_APP_FFMPEG_PATH` | `ffmpeg` | ffmpeg 路径；形态一已默认指向 ffmpeg-over-ip 客户端 |
+| `NOWEN_APP_FFPROBE_PATH` | `ffprobe` | ffprobe 路径；形态一已默认指向 ffmpeg-over-ip 客户端 |
+| `FFMPEG_OVER_IP_CLIENT_ADDRESS` | （必填） | GPU 服务端地址 `<host>:5050`（形态一） |
+| `FFMPEG_OVER_IP_CLIENT_AUTH_SECRET` | （必填） | 与服务端一致的 HMAC 密钥 |
+| `FFMPEG_OVER_IP_CLIENT_FALLBACK_TO_LOCAL` | `false` | 服务端不可用是否回退本机 ffmpeg（容器内无 ffmpeg，保持 false） |
+| `FFMPEG_OVER_IP_CLIENT_DEBUG` | `false` | 客户端打印连接/命令细节（排障用） |
+| `PUID` / `PGID` | `0`/`0` | 运行属主（0 = root） |
 | `TZ` | `Asia/Shanghai` | 时区 |
 
 ---
 
 ## 显卡能力边界（RTX 2070 Super，Turing / TU104）
 
-- H.264 编码 `h264_nvenc`（浏览器通用，默认）、HEVC 编码 `hevc_nvenc`（支持 B 帧）；解码走 NVDEC（`-hwaccel cuda`）。
+- H.264 编码 `h264_nvenc`（浏览器通用，默认）、HEVC 编码 `hevc_nvenc`；解码走 NVDEC（`-hwaccel cuda`）。
 - **不支持 AV1 硬件编/解码**：AV1 片源会自动回退为 CPU 解码 → GPU 编码成 AVC/HEVC，不会生成 `av1_nvenc`。
 
 ---
 
 ## 部署后检查清单
 
-- [ ] `docker ps` 中 nowen-video 状态正常（Up）。
-- [ ] `curl http://127.0.0.1:8080/api/health` 返回正常。
-- [ ] 浏览器 `http://<host>:8080` 能打开，注册第一个账号（自动管理员）。
-- [ ] 媒体目录已挂到 `/media:ro`，Web 里能扫到文件。
-- [ ] 形态 A：ffmpeg/ffprobe 已挂载且 `NOWEN_APP_FFMPEG_PATH/PROBE_PATH` 指向正确；进容器 `ls -l /ffmpeg/ffmpeg` 可见、可执行。
-- [ ] 播放一部需要转码的影片，确认走的是远端 NVENC（看 Windows VM 侧 GPU 占用 / client 日志），而非 CT 的 CPU。
+- [ ] `docker ps` 中 nowen 状态正常（Up），`curl http://127.0.0.1:8080/api/health` 正常。
+- [ ] 浏览器 `http://<host>:8080` 能打开，用 admin/admin123 登录并改密。
+- [ ] 媒体目录已挂到 `/media:ro`，Web 里能扫到文件（扫描走的是远端 ffprobe）。
+- [ ] 形态一：服务端地址/密钥正确；播放需要转码的影片时，Windows VM 的 `nvidia-smi` 出现 `ffmpeg.exe`、Video Encode 有占用，服务端日志含 `-hwaccel cuda … h264_nvenc …`。
 - [ ] 播放器控制栏可切换 640p/720p/1080p/2K/4K/原画，「自动」档在限速时能逐级降级、恢复后升回。

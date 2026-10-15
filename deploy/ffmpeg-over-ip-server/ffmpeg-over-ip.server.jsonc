@@ -1,0 +1,23 @@
+{
+  // ffmpeg-over-ip 服务端配置（GPU 主机）。
+  // 该文件必须与 ffmpeg-over-ip-server 可执行文件放在同一目录，
+  // 或直接用环境变量 FFMPEG_OVER_IP_SERVER_ADDRESS / _AUTH_SECRET 等替代。
+  //
+  // 监听地址：0.0.0.0 表示允许局域网内其他机器（你的 nowen 容器）连接。
+  "address": "0.0.0.0:5050",
+
+  // 共享密钥：必须与 nowen 客户端 FFMPEG_OVER_IP_CLIENT_AUTH_SECRET 完全一致。
+  // 请改成你自己的长随机字符串。
+  "authSecret": "change-me",
+
+  // 日志：stdout / stderr，或文件路径。
+  "log": "stdout",
+
+  // 调试：打印每条收到的 ffmpeg/ffprobe 命令（便于确认远端调度）。
+  "debug": true,
+
+  // 真机 GPU 部署：不要配置 rewrites。
+  // 服务端自带的 Jellyfin-ffmpeg 原生支持 h264_nvenc / hevc_nvenc / av1_nvenc，
+  // 会直接调用本机 NVIDIA 显卡。
+  // "rewrites": []
+}

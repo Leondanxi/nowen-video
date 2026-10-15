@@ -1,0 +1,28 @@
+# ffmpeg-over-ip 服务端（GPU 主机 / Linux 可选）。
+# 前置：宿主机已装 NVIDIA 驱动 + nvidia-container-toolkit
+#   （验证：docker run --rm --gpus all nvidia/cuda:12.4.1-runtime-ubuntu22.04 nvidia-smi）
+# 注意：服务端只在 GPU 主机上跑，跟 nowen 容器不是同一台机器。
+version: '3.8'
+services:
+  ffmpeg-over-ip-server:
+    build:
+      context: .
+      dockerfile: Dockerfile.server
+    image: ffmpeg-over-ip-server:latest
+    container_name: ffmpeg-over-ip-server
+    restart: unless-stopped
+    ports:
+      - "5050:5050"
+    environment:
+      - FFMPEG_OVER_IP_SERVER_ADDRESS=0.0.0.0:5050
+      - FFMPEG_OVER_IP_SERVER_AUTH_SECRET=change-me   # 与 nowen 客户端保持一致
+      - FFMPEG_OVER_IP_SERVER_LOG=stdout
+      - FFMPEG_OVER_IP_SERVER_DEBUG=true
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu, video, compute, utility]
+    # 若你用的是老版 docker compose，可改用顶层: runtime: nvidia
