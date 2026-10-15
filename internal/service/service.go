@@ -261,6 +261,7 @@ func NewServices(repos *repository.Repositories, cfg *config.Config, logger *zap
 	// 创建字幕预处理服务
 	subtitlePreprocessService := NewSubtitlePreprocessService(cfg, repos.SubtitlePreprocess, repos.Media, asrService, scanner, logger)
 	subtitlePreprocessService.SetWSHub(wsHub)
+	subtitlePreprocessService.SetSystemSettingRepo(repos.SystemSetting)
 
 	// V2: 创建可扩展插件系统
 	pluginService := NewPluginService(repos.DB(), filepath.Join(cfg.Cache.CacheDir, "plugins"), logger)

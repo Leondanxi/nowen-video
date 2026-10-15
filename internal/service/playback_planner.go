@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/nowen-video/nowen-video/internal/model"
+	transcodeprofile "github.com/nowen-video/nowen-video/internal/transcode/profile"
 )
 
 const (
@@ -36,6 +37,8 @@ type PlaybackClientCapabilities struct {
 	MSEH264               bool   `json:"mse_h264,omitempty"               form:"mse_h264"`
 	MSEHEVC               bool   `json:"mse_hevc,omitempty"               form:"mse_hevc"`
 	Platform              string `json:"platform,omitempty"               form:"platform"`
+	// Quality 是播放器指定的档位 id（auto/original/1080p/…，§10）。
+	Quality string `json:"quality,omitempty" form:"quality"`
 }
 
 type PlaybackSourceTechnical struct {
@@ -363,12 +366,23 @@ func applyTranscodeFallback(plan *PlaybackPlan) {
 
 func newPlaybackSessionTemplate(plan *PlaybackPlan) *PlaybackSessionTemplate {
 	maxBitrate := 0
+	profileID := "auto"
 	if plan != nil {
 		maxBitrate = plan.Capabilities.MaxBitrate
+		// 档位来自播放器 query?quality=（§10）；空/auto 保持默认。
+		if q := strings.TrimSpace(plan.Capabilities.Quality); q != "" {
+			profileID = q
+		}
+		// 选定具体档位时，未显式指定 max_bitrate 则用该档数值码率封顶。
+		if maxBitrate == 0 && profileID != "" && profileID != "auto" {
+			if p, ok := transcodeprofile.RuntimeEffective(profileID); ok && p.BitrateKbps > 0 {
+				maxBitrate = p.BitrateKbps
+			}
+		}
 	}
 	return &PlaybackSessionTemplate{
 		CreateURL:  "/api/playback/sessions",
-		ProfileID:  "auto",
+		ProfileID:  profileID,
 		MaxBitrate: maxBitrate,
 	}
 }

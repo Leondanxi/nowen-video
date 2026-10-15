@@ -1,9 +1,11 @@
-import { useCallback, useEffect, useRef } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { AlertTriangle, Loader2 } from 'lucide-react'
 import VideoPlayer from './VideoPlayer'
 import { usePlaybackSessionSource } from '@/hooks/usePlaybackSessionSource'
 import { usePlayerStore } from '@/stores/player'
 import { clearPlaybackSessionRuntime, setPlaybackSessionRuntime } from '@/playback/sessionRuntime'
+import type { TranscodePreset } from '@/types'
+import { rememberQuality } from '@/playback/qualityMemory'
 
 interface SessionVideoPlayerProps {
   mediaId: string
@@ -15,6 +17,10 @@ interface SessionVideoPlayerProps {
   knownDuration?: number
   onPreprocessReady?: () => void
   spriteVttUrl?: string
+  /** 共享画质档位（来自上层 AdaptiveWebVideoPlayer） */
+  qualityPresets?: TranscodePreset[]
+  /** 初始档位 id（已结合每片记忆/全局默认解析） */
+  initialQualityId?: string
 }
 
 function formatTimestamp(seconds: number): string {
@@ -37,6 +43,8 @@ export default function SessionVideoPlayer({
   knownDuration,
   onPreprocessReady,
   spriteVttUrl,
+  qualityPresets = [],
+  initialQualityId = 'auto',
 }: SessionVideoPlayerProps) {
   const rootRef = useRef<HTMLDivElement>(null)
   const absolutePositionRef = useRef(Math.max(0, startPosition))
@@ -45,6 +53,10 @@ export default function SessionVideoPlayer({
   const resumeAfterSeekRef = useRef(false)
   const playback = usePlaybackSessionSource({ enabled: true, mediaId, startPosition })
   const isSeeking = playback.loading && Boolean(playback.source)
+
+  // 画质状态：手动选择写入每片记忆；自动档由 VideoPlayer 内控制器驱动
+  const [activeQualityId, setActiveQualityId] = useState(initialQualityId)
+  const [autoEnabled, setAutoEnabled] = useState(initialQualityId === 'auto')
 
   useEffect(() => {
     if (!playback.sessionId || playback.generationId <= 0) return
@@ -252,6 +264,24 @@ export default function SessionVideoPlayer({
   const handleNext = () => { void playback.close('next_media', true); onNext?.() }
   const handlePreprocessReady = () => { void playback.close('switch_to_preprocessed', true); onPreprocessReady?.() }
 
+  // 选档统一入口：已有会话 → restart({profile_id, max_bitrate, backend})
+  const handleRequestQuality = useCallback((presetId: string, source: 'manual' | 'auto') => {
+    if (source === 'manual') rememberQuality(mediaId, presetId)
+    setActiveQualityId(presetId)
+    setAutoEnabled(presetId === 'auto')
+    // 自动档从原画起；具体档位直接使用其 id
+    const profileId = presetId === 'auto' ? 'original' : presetId
+    const preset = qualityPresets.find((p) => p.id === presetId)
+    // preset.bitrate 单位 KBPS，转 bps 作为 max_bitrate 提示；0/原画不带
+    const maxBitrate = preset && preset.bitrate > 0 ? preset.bitrate * 1000 : undefined
+    const position = seekTargetRef.current ?? absolutePositionRef.current
+    void playback.restart(position, 'quality_change', {
+      profile_id: profileId,
+      max_bitrate: maxBitrate,
+      backend: undefined,
+    })
+  }, [mediaId, qualityPresets, playback.restart])
+
   if (!playback.source) {
     if (playback.error) {
       return (
@@ -287,6 +317,10 @@ export default function SessionVideoPlayer({
         nextTitle={nextTitle}
         onPreprocessReady={onPreprocessReady ? handlePreprocessReady : undefined}
         spriteVttUrl={spriteVttUrl}
+        qualityPresets={qualityPresets}
+        activeQualityId={activeQualityId}
+        autoEnabled={autoEnabled}
+        onRequestQuality={handleRequestQuality}
       />
 
       {isSeeking && (

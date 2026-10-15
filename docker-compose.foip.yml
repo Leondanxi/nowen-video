@@ -1,0 +1,71 @@
+# ============================================================
+# nowen-video —— ffmpeg-over-ip 远端 GPU 转码，一键部署
+# ------------------------------------------------------------
+# 本机（Docker，无 GPU）：nowen 本体 + ffmpeg-over-ip 客户端
+# 另一台机器（有 GPU，如直通 RTX 2070 Super 的 Windows VM）：
+#   跑 ffmpeg-over-ip 服务端（见 deploy/ffmpeg-over-ip-server/）。
+#
+# 用法：
+#   1) 先在 GPU 机器上部署好 ffmpeg-over-ip 服务端，记下 IP、端口、密钥；
+#   2) 把下面的 FFMPEG_OVER_IP_CLIENT_ADDRESS / AUTH_SECRET 改成服务端的；
+#   3) 改媒体目录挂载（左边冒号前）；
+#   4) docker compose -f docker-compose.foip.yml up -d --build
+#   5) 浏览器打开 http://<本机>:8080，默认管理员 admin/admin123（首次强制改密）。
+# ============================================================
+version: '3.8'
+
+services:
+  nowen-video:
+    build:
+      context: .
+      dockerfile: Dockerfile.foip
+    image: nowen-video:foip
+    container_name: nowen-video
+    restart: unless-stopped
+
+    ports:
+      - "8080:8080"
+
+    user: "0:0"
+    environment:
+      - PUID=0
+      - PGID=0
+      - UMASK=000
+      - TZ=Asia/Shanghai
+
+      - NOWEN_APP_PORT=8080
+      - NOWEN_APP_DATA_DIR=/data
+      - NOWEN_APP_WEB_DIR=/app/web/dist
+      - NOWEN_DATABASE_DB_PATH=/data/nowen.db
+      - NOWEN_CACHE_CACHE_DIR=/cache
+      - NOWEN_LOGGING_LEVEL=info
+
+      # ===== ffmpeg-over-ip 客户端：改成你 GPU 服务端的地址与密钥 =====
+      - FFMPEG_OVER_IP_CLIENT_ADDRESS=192.168.1.100:5050
+      - FFMPEG_OVER_IP_CLIENT_AUTH_SECRET=change-me
+      - FFMPEG_OVER_IP_CLIENT_FALLBACK_TO_LOCAL=false
+
+      # ===== 强制硬件管线（NVENC），容器无 GPU 也不回退 CPU =====
+      - NOWEN_TRANSCODE_HW_DECODE_MODE=hardware
+      - NOWEN_TRANSCODE_HW_ENCODER=nvenc
+
+    volumes:
+      - ./data:/data
+      - ./cache:/cache
+      # 媒体目录（只读；按实际路径修改，可挂多个）
+      - /volume1/Media:/media:ro
+
+    # 本机无 GPU，不配置 devices。
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8080/api/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+        reservations:
+          memory: 384M

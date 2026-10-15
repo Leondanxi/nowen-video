@@ -40,6 +40,7 @@ func newFullPlaybackRuntime(
 		mediaExecution,
 		cfg,
 		logger,
+		repos.SystemSetting,
 	)
 	if err != nil {
 		return nil, err
@@ -65,6 +66,8 @@ func (r *fullPlaybackRuntime) Register(api *gin.RouterGroup, guardByMediaID gin.
 	if r == nil {
 		return
 	}
+	// 公开画质档位菜单（§11.1）。静态路由须注册在 /stream/:id 之前。
+	api.GET("/stream/quality/presets", r.plan.QualityPresets)
 	api.GET("/stream/:id/plan", guardByMediaID, r.plan.Get)
 	api.POST("/playback/sessions", r.handler.Create)
 	api.GET("/playback/sessions/:sessionID/status", r.handler.Status)

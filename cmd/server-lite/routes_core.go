@@ -134,6 +134,8 @@ func registerCoreAPI(
 	api.GET("/series/:id/logo", handlers.Series.Logo)
 	api.GET("/series/:id/persons", handlers.Series.GetPersons)
 
+	// 公开画质档位菜单（§11.1）。静态路由须注册在 /stream/:id 之前，避免 "quality" 被 :id 捕获。
+	api.GET("/stream/quality/presets", playbackPlan.QualityPresets)
 	api.GET("/stream/:id/info", guardByMediaID, playbackPlan.GetInfo)
 	api.GET("/stream/:id/plan", guardByMediaID, playbackPlan.Get)
 	api.GET("/stream/:id/direct", guardByMediaID, handlers.Stream.Direct)

@@ -2,6 +2,7 @@ package ffmpeg
 
 import (
 	"fmt"
+	"math"
 	"path/filepath"
 	"strconv"
 )
@@ -63,6 +64,40 @@ type BuildOptions struct {
 	// SkipVAAPIRateLimits VAAPI 分支是否省略 -maxrate/-bufsize/-keyint_min。
 	// 仅用于与历史 transcode 实现保持字节一致；新场景不建议开启。
 	SkipVAAPIRateLimits bool
+
+	// ---------- 新版码率/质量控制（冻结规格 §7，仅实时转码使用） ----------
+	// UseNumericRateControl=true 时启用下面三个字段描述的数值码率/CRF 流程，
+	// 忽略 legacy 的 Profile.VideoBitrate 字符串与 UseCRF；
+	// false 时行为与历史完全一致（preprocess / certification 命令不受影响）。
+	UseNumericRateControl bool
+	// NumericBitrateKbps >0 = 码率档（KBPS）；==0 = 恒定质量（CRF/CQ/CQP）。
+	NumericBitrateKbps int
+	// EffectiveCRF 是每档 CRF（>0）优先，否则全局 transcode_crf。质量模式使用。
+	EffectiveCRF int
+	// SourceIsAV1 标记源视频编码为 AV1。Turing NVENC/NVDEC 无 AV1 硬编解码：
+	// 此时去掉硬件解码预参（CPU 解码 + GPU 编码），且绝不生成 AV1 硬参。
+	SourceIsAV1 bool
+}
+
+// DefaultTranscodeCRF 是软件 x264 的全局恒定质量基准（§3.1 transcode_crf 默认 18）。
+const DefaultTranscodeCRF = 18
+
+// CRFToNVENCCQ 把 x264 CRF 尺度映射到 NVENC CQ 尺度（冻结规格 §7）。
+// cq = clamp(round(CRF*1.35), 0, 51)。
+func CRFToNVENCCQ(crf int) int {
+	cq := int(math.Round(float64(crf) * 1.35))
+	if cq < 0 {
+		return 0
+	}
+	if cq > 51 {
+		return 51
+	}
+	return cq
+}
+
+// kbpsArg 把 KBPS 整数转成 ffmpeg 的 "NNNNk" 码率参数。
+func kbpsArg(kbps int) string {
+	return strconv.Itoa(kbps) + "k"
 }
 
 // BuildHLSArgs 根据 opts 构建完整的 FFmpeg 参数列表（不含 ffmpeg 二进制路径）。
@@ -90,22 +125,28 @@ func BuildHLSArgs(opts BuildOptions) []string {
 	}
 	baseArgs = append(baseArgs, opts.ExtraInput...)
 
-	// 硬件加速前置参数
-	switch opts.HWAccel {
-	case HWAccelNVENC:
-		baseArgs = append(baseArgs, "-hwaccel", "cuda", "-hwaccel_output_format", "cuda")
-	case HWAccelQSV:
-		baseArgs = append(baseArgs, "-hwaccel", "qsv")
-		if opts.QSVAttachOutputFormat {
-			baseArgs = append(baseArgs, "-hwaccel_output_format", "qsv")
+	// 硬件加速前置参数。AV1 源在 Turing 等无 AV1 硬解的 GPU 上无效，
+	// 此时去掉硬件解码预参（CPU 解码 + GPU 编码），见 §7 AV1 边界。
+	hwDecode := opts.HWAccel != HWAccelNone && !opts.SourceIsAV1
+	if hwDecode {
+		switch opts.HWAccel {
+		case HWAccelNVENC:
+			baseArgs = append(baseArgs, "-hwaccel", "cuda", "-hwaccel_output_format", "cuda")
+		case HWAccelQSV:
+			baseArgs = append(baseArgs, "-hwaccel", "qsv")
+			if opts.QSVAttachOutputFormat {
+				baseArgs = append(baseArgs, "-hwaccel_output_format", "qsv")
+			}
+		case HWAccelVAAPI:
+			dev := opts.VAAPIDevice
+			baseArgs = append(baseArgs,
+				"-hwaccel", "vaapi",
+				"-hwaccel_output_format", "vaapi",
+				"-vaapi_device", dev,
+			)
+		case HWAccelAMF:
+			baseArgs = append(baseArgs, "-hwaccel", "d3d11va")
 		}
-	case HWAccelVAAPI:
-		dev := opts.VAAPIDevice
-		baseArgs = append(baseArgs,
-			"-hwaccel", "vaapi",
-			"-hwaccel_output_format", "vaapi",
-			"-vaapi_device", dev,
-		)
 	}
 
 	baseArgs = append(baseArgs, "-i", opts.InputPath)
@@ -152,6 +193,10 @@ func BuildHLSArgs(opts BuildOptions) []string {
 
 // buildVideoArgs 按 HWAccel 分支生成视频编码参数。
 func buildVideoArgs(opts BuildOptions, gopStr string) []string {
+	if opts.UseNumericRateControl {
+		return buildNumericVideoArgs(opts, gopStr)
+	}
+
 	p := opts.Profile
 	maxRate := p.MaxBitrate
 	if maxRate == "" {
@@ -288,5 +333,149 @@ func buildVideoArgs(opts BuildOptions, gopStr string) []string {
 			"-vf", scale,
 		)
 		return args
+	}
+}
+
+// buildNumericVideoArgs 按"后端 + 档位"生成实时转码视频参数（冻结规格 §7）。
+//
+//	缩放：Width==0（原画）不加 scale；Width>0 按后端选择对应 scale 滤镜。
+//	码率：BitrateKbps>0 → -b:v/-maxrate(1.5x)/-bufsize(2x)；==0 → CRF/CQ/CQP 恒定质量。
+//	AV1 源：由调用方（buildArgs）在源 codec 为 AV1 且硬件后端时设置 SourceIsAV1，
+//	该路径已在 BuildHLSArgs 中去掉硬件解码预参；这里绝不生成 AV1 编码器。
+func buildNumericVideoArgs(opts BuildOptions, gopStr string) []string {
+	p := opts.Profile
+	bitrate := opts.NumericBitrateKbps
+	crf := opts.EffectiveCRF
+	if crf <= 0 {
+		crf = DefaultTranscodeCRF
+	}
+	scale := opts.VideoFilter
+	// Width==0（原画）且未显式指定滤镜 → 不缩放。
+	skipScale := p.Width <= 0 && scale == ""
+
+	appendVF := func(args []string) []string {
+		if skipScale {
+			return args
+		}
+		if scale == "" {
+			switch opts.HWAccel {
+			case HWAccelNVENC:
+				scale = fmt.Sprintf("scale_cuda=%d:%d:format=nv12", p.Width, p.Height)
+			case HWAccelQSV:
+				scale = fmt.Sprintf("scale_qsv=%d:%d", p.Width, p.Height)
+			case HWAccelVAAPI:
+				scale = fmt.Sprintf("scale_vaapi=w=%d:h=%d:format=nv12", p.Width, p.Height)
+			case HWAccelAMF:
+				scale = fmt.Sprintf("scale=%d:%d:flags=lanczos", p.Width, p.Height)
+			default:
+				scale = fmt.Sprintf("scale=%d:%d", p.Width, p.Height)
+			}
+		}
+		return append(args, "-vf", scale)
+	}
+
+	switch opts.HWAccel {
+	case HWAccelNVENC:
+		args := []string{"-c:v", "h264_nvenc", "-preset", "p5", "-rc", "vbr", "-spatial-aq", "1"}
+		if bitrate > 0 {
+			args = append(args,
+				"-b:v", kbpsArg(bitrate),
+				"-maxrate", kbpsArg(bitrate*3/2),
+				"-bufsize", kbpsArg(bitrate*2),
+			)
+		} else {
+			// 恒定质量：-b:v 0 + NVENC CQ（CRF→CQ 映射）。
+			args = append(args, "-b:v", "0", "-cq", strconv.Itoa(CRFToNVENCCQ(crf)))
+		}
+		args = appendVF(args)
+		return append(args,
+			"-g", gopStr,
+			"-keyint_min", gopStr,
+			"-sc_threshold", "0",
+		)
+
+	case HWAccelQSV:
+		preset := opts.QSVPreset
+		if preset == "" {
+			preset = "faster"
+		}
+		args := []string{"-c:v", "h264_qsv", "-preset", preset}
+		if bitrate > 0 {
+			args = append(args,
+				"-b:v", kbpsArg(bitrate),
+				"-maxrate", kbpsArg(bitrate*3/2),
+				"-bufsize", kbpsArg(bitrate*2),
+			)
+		} else {
+			args = append(args, "-global_quality", strconv.Itoa(crf))
+		}
+		args = appendVF(args)
+		return append(args,
+			"-pix_fmt", "nv12",
+			"-g", gopStr,
+			"-keyint_min", gopStr,
+		)
+
+	case HWAccelVAAPI:
+		args := []string{"-c:v", "h264_vaapi"}
+		if bitrate > 0 {
+			args = append(args,
+				"-b:v", kbpsArg(bitrate),
+				"-maxrate", kbpsArg(bitrate*3/2),
+				"-bufsize", kbpsArg(bitrate*2),
+			)
+		} else {
+			args = append(args, "-rc_mode", "CQP", "-qp", strconv.Itoa(crf))
+		}
+		args = appendVF(args)
+		return append(args,
+			"-g", gopStr,
+			"-keyint_min", gopStr,
+		)
+
+	case HWAccelAMF:
+		args := []string{"-c:v", "h264_amf", "-quality", "quality"}
+		if bitrate > 0 {
+			args = append(args, "-rc", "cbr", "-b:v", kbpsArg(bitrate))
+		} else {
+			args = append(args,
+				"-rc", "cqp",
+				"-qp_i", strconv.Itoa(crf),
+				"-qp_p", strconv.Itoa(crf),
+				"-qp_b", strconv.Itoa(crf),
+			)
+		}
+		args = appendVF(args)
+		return append(args,
+			"-g", gopStr,
+			"-keyint_min", gopStr,
+		)
+
+	default:
+		// 软件 libx264。
+		preset := opts.X264Preset
+		if preset == "" {
+			preset = "veryfast"
+		}
+		args := []string{"-c:v", "libx264", "-preset", preset}
+		if opts.SoftwareTune != "" {
+			args = append(args, "-tune", opts.SoftwareTune)
+		}
+		if bitrate > 0 {
+			args = append(args,
+				"-b:v", kbpsArg(bitrate),
+				"-maxrate", kbpsArg(bitrate*3/2),
+				"-bufsize", kbpsArg(bitrate*2),
+			)
+		} else {
+			args = append(args, "-crf", strconv.Itoa(crf))
+		}
+		args = appendVF(args)
+		return append(args,
+			"-g", gopStr,
+			"-keyint_min", gopStr,
+			"-sc_threshold", "0",
+			"-pix_fmt", "yuv420p",
+		)
 	}
 }

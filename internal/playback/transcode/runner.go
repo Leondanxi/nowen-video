@@ -7,6 +7,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -46,6 +47,10 @@ type Config struct {
 
 	X264Preset string
 	QSVPreset  string
+
+	// TranscodeCRF 是全局 x264 CRF / 恒定质量基准（§3.1 transcode_crf，默认 18）。
+	// 每档 Preset.CRF>0 时优先用档位值。
+	TranscodeCRF int
 }
 
 func DefaultConfig(ffmpegPath, hwAccel, vaapiDevice string, threads int) Config {
@@ -88,6 +93,11 @@ type StartRequest struct {
 	FPS             float64
 	Backend         string
 	VideoFilter     string
+	// DisableFallback=true 时（显式强制硬件且 gpu_fallback_cpu=false）：
+	// 只尝试 preferred 后端，启动失败不静默回退 CPU，而是返回明确错误（§8）。
+	DisableFallback bool
+	// SourceIsAV1 标记源视频编码为 AV1；硬件后端下去掉硬解预参、绝不生成 AV1 硬参（§7）。
+	SourceIsAV1 bool
 }
 
 type ReadyResult struct {
@@ -187,14 +197,15 @@ func (r *Runner) Start(ctx context.Context, request StartRequest) (*Execution, e
 	if err != nil {
 		return nil, err
 	}
-	if request.ProfileID == "" {
-		request.ProfileID = runtimeView.Snapshot.ProfileID
+	if request.ProfileID == "" || request.ProfileID == transcodeprofile.PresetIDAuto {
+		// 自动档为虚拟模式（§2）：实时转码从"原画"起播，由 ABR 客户端降档。
+		request.ProfileID = transcodeprofile.PresetIDOriginal
 	}
 	if request.StartPositionMS <= 0 {
 		request.StartPositionMS = runtimeView.Snapshot.StartPositionMS
 	}
-	if _, ok := transcodeprofile.Runtime(request.ProfileID); !ok {
-		return nil, fmt.Errorf("unknown runtime transcode profile %q", request.ProfileID)
+	if _, ok := transcodeprofile.RuntimeEffective(request.ProfileID); !ok {
+		return nil, fmt.Errorf("unknown quality preset %q", request.ProfileID)
 	}
 	processLease, err := r.sessions.AcquireProcess(request.SessionID, request.GenerationID)
 	if err != nil {
@@ -223,7 +234,8 @@ func (r *Runner) run(runtimeView playbacksession.GenerationRuntime, request Star
 		preferredBackend = ffmpeg.HWAccelNone
 	}
 	backends := []string{preferredBackend}
-	if preferredBackend != ffmpeg.HWAccelNone {
+	// §8：显式强制硬件（DisableFallback）时不追加 CPU 回退，失败直接报错。
+	if preferredBackend != ffmpeg.HWAccelNone && !request.DisableFallback {
 		backends = append(backends, ffmpeg.HWAccelNone)
 	}
 
@@ -353,6 +365,19 @@ func (r *Runner) run(runtimeView playbacksession.GenerationRuntime, request Star
 			)
 			continue
 		}
+		if backend != ffmpeg.HWAccelNone && request.DisableFallback {
+			// §8：已强制硬件、未回退 CPU —— 排障日志，便于定位远端 GPU / 硬解问题。
+			r.logger.Errorw("playback hardware startup failed; fallback to CPU is disabled (forced hardware)",
+				"session_id", request.SessionID,
+				"generation_id", request.GenerationID,
+				"backend", backend,
+				"error", finalResult.ErrorText(),
+				"watch_error", lastWatchErr,
+			)
+			if finalResult.Err == nil {
+				finalResult.Err = fmt.Errorf("hardware backend %q failed and CPU fallback is disabled", backend)
+			}
+		}
 		break
 	}
 
@@ -398,9 +423,9 @@ func (r *Runner) publishReady(request StartRequest, execution *Execution, starte
 }
 
 func (r *Runner) buildArgs(runtimeView playbacksession.GenerationRuntime, request StartRequest, backend string) ([]string, error) {
-	profile, ok := transcodeprofile.Runtime(request.ProfileID)
+	preset, ok := transcodeprofile.RuntimeEffective(request.ProfileID)
 	if !ok {
-		return nil, fmt.Errorf("unknown runtime transcode profile %q", request.ProfileID)
+		return nil, fmt.Errorf("unknown quality preset %q", request.ProfileID)
 	}
 	fps := request.FPS
 	if fps <= 0 {
@@ -410,36 +435,51 @@ func (r *Runner) buildArgs(runtimeView playbacksession.GenerationRuntime, reques
 	if gopSize < 1 {
 		gopSize = r.cfg.SegmentDuration * 25
 	}
+
+	// 缩放：仅软件后端由 runner 生成 decrease+pad 滤镜；硬件后端由 encoder 按
+	// 后端生成 scale_cuda/scale_qsv/…。原画（Width==0）任何后端都不加 scale。
 	videoFilter := request.VideoFilter
-	if videoFilter == "" && backend == ffmpeg.HWAccelNone {
-		videoFilter = fitScaleFilter(profile.Width, profile.Height)
+	if videoFilter == "" && backend == ffmpeg.HWAccelNone && preset.Width > 0 {
+		videoFilter = fitScaleFilter(preset.Width, preset.Height)
 	}
-	qsvGlobalQuality := 0
-	if backend == ffmpeg.HWAccelQSV {
-		qsvGlobalQuality = 23
+
+	// 每档 CRF>0 优先，否则全局 transcode_crf。
+	crf := preset.CRF
+	if crf <= 0 {
+		crf = r.cfg.TranscodeCRF
 	}
+
+	audioBitrate := preset.AudioBitrate
+	if audioBitrate == "" && preset.AudioKbps > 0 {
+		audioBitrate = strconv.Itoa(preset.AudioKbps) + "k"
+	}
+	if audioBitrate == "" {
+		audioBitrate = "128k"
+	}
+
 	args := ffmpeg.BuildRollingHLSArgs(ffmpeg.BuildOptions{
 		InputPath:             request.InputPath,
 		OutputDir:             runtimeView.OutputDir,
 		ExtraInput:            request.ExtraInput,
 		HWAccel:               backend,
-		Profile:               ffmpeg.Profile{Width: profile.Width, Height: profile.Height, VideoBitrate: profile.VideoBitrate, AudioBitrate: profile.AudioBitrate},
+		Profile:               ffmpeg.Profile{Width: preset.Width, Height: preset.Height, AudioBitrate: audioBitrate},
 		VAAPIDevice:           r.cfg.VAAPIDevice,
 		X264Preset:            r.cfg.X264Preset,
 		QSVPreset:             r.cfg.QSVPreset,
 		Threads:               r.cfg.Threads,
-		UseCRF:                backend == ffmpeg.HWAccelNone,
-		CRF:                   23,
 		SoftwareTune:          "zerolatency",
-		NvencTune:             "ll",
 		QSVAttachOutputFormat: false,
-		QSVGlobalQuality:      qsvGlobalQuality,
 		VideoFilter:           videoFilter,
 		HLSTime:               r.cfg.SegmentDuration,
 		HLSFlags:              "delete_segments+temp_file+independent_segments+program_date_time",
 		ForceKeyFrames:        true,
 		StartOffsetSec:        float64(request.StartPositionMS) / 1000,
 		GOPSize:               gopSize,
+
+		UseNumericRateControl: true,
+		NumericBitrateKbps:    preset.BitrateKbps,
+		EffectiveCRF:          crf,
+		SourceIsAV1:           request.SourceIsAV1,
 	}, ffmpeg.RollingHLSOptions{
 		ListSize:        r.cfg.PlaylistWindow,
 		DeleteThreshold: r.cfg.DeleteThreshold,

@@ -1,6 +1,7 @@
 import { useAuthStore } from '@/stores/auth'
 import type {
   MediaPlayInfo,
+  TranscodePreset,
 } from '@/types'
 import api, { getResolvedApiBaseURL } from './client'
 import {
@@ -151,6 +152,8 @@ export interface CreatePlaybackSessionRequest {
   subtitle_track?: number
   burn_subtitle?: boolean
   max_bitrate?: number
+  /** 可选；空=按设置解析有效后端（nvenc/qsv/...） */
+  backend?: string
 }
 
 export interface RestartPlaybackSessionRequest {
@@ -160,6 +163,8 @@ export interface RestartPlaybackSessionRequest {
   subtitle_track?: number
   burn_subtitle?: boolean
   max_bitrate?: number
+  /** 可选；空=按设置解析有效后端 */
+  backend?: string
   reason?: string
 }
 
@@ -187,6 +192,8 @@ function planParams(caps: BrowserMediaCapability, overrides?: {
   supportsRemux?: boolean
   forceTranscode?: boolean
   maxBitrate?: number
+  /** 目标画质档位 id（可选）；'auto'/undefined = 服务端默认 */
+  quality?: string
 }) {
   const base = buildClientCapabilities(caps)
   return {
@@ -195,6 +202,7 @@ function planParams(caps: BrowserMediaCapability, overrides?: {
     supports_hevc: base.supports_hevc,
     force_transcode: overrides?.forceTranscode ?? false,
     max_bitrate: overrides?.maxBitrate,
+    quality: overrides?.quality,
     hevc_hardware: base.hevc_hardware,
     audio_supports_ac3: base.audio_supports_ac3,
     audio_supports_eac3: base.audio_supports_eac3,
@@ -292,6 +300,7 @@ export const streamApi = {
     supportsHEVC?: boolean
     forceTranscode?: boolean
     maxBitrate?: number
+    quality?: string
   }) => {
     const caps = getCaps()
     const params = planParams(caps, {
@@ -299,6 +308,7 @@ export const streamApi = {
       supportsRemux: capabilities?.supportsRemux,
       forceTranscode: capabilities?.forceTranscode,
       maxBitrate: capabilities?.maxBitrate,
+      quality: capabilities?.quality,
     })
     const response = await api.get<{ data: PlaybackPlan }>(`/stream/${mediaId}/plan`, { params })
     playbackPlanCache.set(mediaId, response.data.data)
@@ -306,6 +316,11 @@ export const streamApi = {
   },
 
   getCachedPlaybackPlan: (mediaId: string) => playbackPlanCache.get(mediaId),
+
+  /** 公共共享画质档位（登录用户可取；不含 auto，auto 由前端置顶） */
+  getQualityPresets: async () => {
+    return api.get<{ data: { default: string; presets: TranscodePreset[] } }>('/stream/quality/presets')
+  },
 
   requiresPlaybackSession: (mediaId: string) => {
     const plan = playbackPlanCache.get(mediaId)

@@ -214,6 +214,7 @@ export function usePlaybackSessionSource({
         subtitle_track: overrides.subtitle_track ?? -1,
         burn_subtitle: overrides.burn_subtitle ?? false,
         max_bitrate: overrides.max_bitrate,
+        backend: overrides.backend,
         reason,
       })
       const ready = await waitUntilReady(response.data.data, isCurrent)
