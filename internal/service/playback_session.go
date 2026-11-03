@@ -12,6 +12,7 @@ import (
 
 	"github.com/nowen-video/nowen-video/internal/config"
 	"github.com/nowen-video/nowen-video/internal/model"
+	transcodeprofile "github.com/nowen-video/nowen-video/internal/transcode/profile"
 	playbacksession "github.com/nowen-video/nowen-video/internal/playback/session"
 	playbacktranscode "github.com/nowen-video/nowen-video/internal/playback/transcode"
 	"github.com/nowen-video/nowen-video/internal/repository"
@@ -181,6 +182,7 @@ func (s *PlaybackSessionService) Create(
 	if profileID == "" || profileID == "auto" {
 		profileID = s.defaultProfile(media)
 	}
+	profileID = normalizeRuntimeProfile(profileID)
 
 	created, err := s.manager.Create(ctx, playbacksession.CreateRequest{
 		UserID:          userID,
@@ -226,6 +228,7 @@ func (s *PlaybackSessionService) Restart(
 			profileID = s.defaultProfile(media)
 		}
 	}
+	profileID = normalizeRuntimeProfile(profileID)
 	generation, err := s.manager.BeginGeneration(sessionID, playbacksession.BeginGenerationRequest{
 		ProfileID:       profileID,
 		StartPositionMS: request.StartPositionMS,
@@ -495,7 +498,29 @@ func (s *PlaybackSessionService) defaultProfile(media *model.Media) string {
 	if height >= 480 {
 		return "480p"
 	}
-	return "360p"
+	// 运行时画质阶梯没有 "360p"：640×360 档在运行时命名为 "640p"。
+	// 未知 / 低于 480 的源统一回落到该档，避免 unknown quality preset 导致 500。
+	return "640p"
+}
+
+// normalizeRuntimeProfile 把外部传入的档位 id 归一化为运行时画质阶梯的有效 id。
+// 运行时阶梯（defaultQualityLadder）与旧 legacy catalog 在个别档位命名上不一致：
+//   - 旧 "360p"（640×360）对应运行时 "640p"；
+//   - 旧 "2K"/"4K" 经小写归一对应运行时 "2k"/"4k"。
+// 已是有效运行时 id、空串或 auto 原样返回；无法识别的 id 原样返回，
+// 交由 RuntimeEffective 报出明确错误，而不是静默替换。
+func normalizeRuntimeProfile(id string) string {
+	v := strings.ToLower(strings.TrimSpace(id))
+	if v == "" || v == transcodeprofile.PresetIDAuto {
+		return v
+	}
+	if _, ok := transcodeprofile.RuntimeEffective(v); ok {
+		return v
+	}
+	if v == "360p" {
+		return "640p"
+	}
+	return id
 }
 
 func (s *PlaybackSessionService) closeAfterStartFailure(sessionID string) {
