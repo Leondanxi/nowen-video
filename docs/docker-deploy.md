@@ -135,4 +135,4 @@ docker compose -f docker-compose.app.yml up -d --build   # 记得把 ffmpeg/ffpr
 - [ ] 浏览器 `http://<host>:8080` 能打开，用 admin/admin123 登录并改密。
 - [ ] 媒体目录已挂到 `/media:ro`，Web 里能扫到文件（扫描走的是远端 ffprobe）。
 - [ ] 形态一：服务端地址/密钥正确；播放需要转码的影片时，Windows VM 的 `nvidia-smi` 出现 `ffmpeg.exe`、Video Encode 有占用，服务端日志含 `-hwaccel cuda … h264_nvenc …`。
-- [ ] 播放器控制栏可切换 640p/720p/1080p/2K/4K/原画，「自动」档在限速时能逐级降级、恢复后升回。
+- [ ] 播放器控制栏可切换 480p/640p/720p/1080p/2K/4K/原画，「自动」档在限速时能逐级降级、恢复后升回；转码/调画质后进度条可正常拖动（含窗口外跳转）。

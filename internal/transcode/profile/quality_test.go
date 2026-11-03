@@ -15,12 +15,19 @@ func resetOverrides(t *testing.T) {
 func TestDefaultQualityOrderAndFixed(t *testing.T) {
 	resetOverrides(t)
 	got := Effective()
-	require.Len(t, got, 6)
+	require.Len(t, got, 7)
 	ids := []string{}
 	for _, p := range got {
 		ids = append(ids, p.Name)
 	}
-	require.Equal(t, []string{"original", "4k", "2k", "1080p", "720p", "640p"}, ids)
+	require.Equal(t, []string{"original", "4k", "2k", "1080p", "720p", "640p", "480p"}, ids)
+
+	// 480p 为最低码率兜底档（400kbps），保证弱 CPU/受限链路可播。
+	low := got[len(got)-1]
+	require.Equal(t, "480p", low.Name)
+	require.Equal(t, 400, low.BitrateKbps)
+	require.Equal(t, 854, low.Width)
+	require.Equal(t, 480, low.Height)
 }
 
 func TestOriginalPresetIsFixedZero(t *testing.T) {
@@ -71,7 +78,7 @@ func TestSetOverridesAtomically(t *testing.T) {
 
 	// 清空覆盖 → 回退内置默认。
 	require.NoError(t, SetOverrides(nil))
-	require.Len(t, Effective(), 6)
+	require.Len(t, Effective(), 7)
 }
 
 func TestSetOverridesValidationRejectsWhole(t *testing.T) {
@@ -98,5 +105,5 @@ func TestSetOverridesValidationRejectsWhole(t *testing.T) {
 		{Name: "1080p", Width: 1920, BitrateKbps: -5},
 	}))
 	// 校验失败不污染生效表（仍为内置默认）。
-	require.Len(t, Effective(), 6)
+	require.Len(t, Effective(), 7)
 }

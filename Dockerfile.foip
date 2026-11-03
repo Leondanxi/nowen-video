@@ -22,7 +22,7 @@ RUN chmod 0755 /usr/local/bin/ffmpeg-over-ip-client
 
 # ---------- 2) 前端（国内 npm 镜像）----------
 FROM node:22-alpine AS frontend
-ARG NOWEN_VERSION=0.4.2
+ARG NOWEN_VERSION=0.5.0
 WORKDIR /app/web
 COPY web/package*.json ./
 RUN npm ci --registry=https://registry.npmmirror.com
@@ -32,7 +32,7 @@ RUN npx vite build
 
 # ---------- 3) 后端（Go 依赖走 goproxy.cn；固定 linux/amd64）----------
 FROM golang:1.26-alpine AS backend
-ARG NOWEN_VERSION=0.4.2
+ARG NOWEN_VERSION=0.5.0
 WORKDIR /app
 ENV GOPROXY=https://goproxy.cn,https://goproxy.io,direct
 COPY go.mod go.sum ./
@@ -46,7 +46,7 @@ RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
 
 # ---------- 4) 运行时：本体 + ffmpeg-over-ip 客户端（无 ffmpeg/无 GPU）----------
 FROM alpine:3.24
-ARG NOWEN_VERSION=0.4.2
+ARG NOWEN_VERSION=0.5.0
 
 RUN apk add --no-cache tzdata ca-certificates su-exec
 RUN addgroup -S nowen && adduser -S nowen -G nowen

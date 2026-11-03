@@ -24,6 +24,8 @@ const (
 	defaultPlaybackStartupWait         = 3 * time.Second
 	defaultPlaybackHardwareStartBudget = 10 * time.Second
 	defaultPlaybackFirstSegmentTimeout = 24 * time.Second
+	// 总启动预算（硬件尝试+软件回退）必须短于前端启动死线（30s），留 2s 余量。
+	defaultPlaybackTotalStartupTimeout = 28 * time.Second
 )
 
 type PlaybackSessionCreateRequest struct {
@@ -137,6 +139,7 @@ func NewPlaybackSessionService(
 	// encoder failure, while retaining a bounded software fallback window.
 	runnerConfig.HardwareStartBudget = defaultPlaybackHardwareStartBudget
 	runnerConfig.FirstSegmentTimeout = defaultPlaybackFirstSegmentTimeout
+	runnerConfig.TotalStartupTimeout = defaultPlaybackTotalStartupTimeout
 	runner, err := playbacktranscode.NewRunner(
 		manager,
 		execution.ExecutionRuntime(),
@@ -233,6 +236,14 @@ func (s *PlaybackSessionService) Restart(
 		Reason:          normalizedRestartReason(request.Reason),
 	})
 	if err != nil {
+		return PlaybackSessionResult{}, err
+	}
+	// Release the bounded single-slot governor before the replacement starts;
+	// otherwise the new generation blocks waiting for the previous encoder's
+	// slot, which is only released after activation (a seek/quality restart
+	// deadlock). The old playlist/segments remain readable for buffered media.
+	if err := s.manager.StopCurrentGenerationProcess(sessionID); err != nil {
+		_ = s.manager.MarkGenerationFailed(sessionID, generation.ID, "generation_start_failed", err.Error())
 		return PlaybackSessionResult{}, err
 	}
 	execution, err := s.startGeneration(ctx, media, sessionID, generation.ID, profileID, request.StartPositionMS, request.Backend)

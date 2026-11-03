@@ -43,6 +43,9 @@ type Config struct {
 	DeleteThreshold     int
 	FirstSegmentTimeout time.Duration
 	HardwareStartBudget time.Duration
+	// TotalStartupTimeout 限制"首个分片"整段墙钟窗口（含硬件尝试+软件回退），
+	// 必须短于客户端启动死线（默认 30s），避免回退累计超时。
+	TotalStartupTimeout time.Duration
 	FirstSegmentPoll    time.Duration
 
 	X264Preset string
@@ -64,6 +67,7 @@ func DefaultConfig(ffmpegPath, hwAccel, vaapiDevice string, threads int) Config 
 		DeleteThreshold:     defaultDeleteThreshold,
 		FirstSegmentTimeout: defaultFirstSegmentTimeout,
 		HardwareStartBudget: defaultHardwareStartBudget,
+		TotalStartupTimeout: defaultFirstSegmentTimeout + defaultHardwareStartBudget,
 		FirstSegmentPoll:    defaultFirstSegmentPoll,
 		X264Preset:          defaultX264Preset,
 		QSVPreset:           defaultQSVPreset,
@@ -160,6 +164,9 @@ func NewRunner(sessions *playbacksession.Manager, runtime Runtime, cfg Config, l
 	if cfg.HardwareStartBudget <= 0 {
 		cfg.HardwareStartBudget = defaultHardwareStartBudget
 	}
+	if cfg.TotalStartupTimeout <= 0 {
+		cfg.TotalStartupTimeout = cfg.FirstSegmentTimeout + cfg.HardwareStartBudget
+	}
 	if cfg.FirstSegmentPoll <= 0 {
 		cfg.FirstSegmentPoll = defaultFirstSegmentPoll
 	}
@@ -225,7 +232,9 @@ func (r *Runner) Start(ctx context.Context, request StartRequest) (*Execution, e
 
 func (r *Runner) run(runtimeView playbacksession.GenerationRuntime, request StartRequest, execution *Execution) {
 	startedAt := time.Now()
-	deadline := startedAt.Add(r.cfg.FirstSegmentTimeout)
+	// totalCap 约束整段"首个分片"墙钟窗口（硬件尝试+软件回退），保证不越过
+	// 客户端启动死线。每个后端尝试再在 totalCap 内取各自的独立预算。
+	totalCap := startedAt.Add(r.cfg.TotalStartupTimeout)
 	preferredBackend := request.Backend
 	if preferredBackend == "" {
 		preferredBackend = r.cfg.HWAccel
@@ -266,7 +275,7 @@ func (r *Runner) run(runtimeView playbacksession.GenerationRuntime, request Star
 			finalResult = transcodeexecutor.Result{Err: runtimeView.Context.Err(), Cancelled: true}
 			break
 		}
-		if time.Now().After(deadline) {
+		if time.Now().After(totalCap) {
 			finalResult = transcodeexecutor.Result{Err: context.DeadlineExceeded, TimedOut: true}
 			lastWatchErr = context.DeadlineExceeded
 			break
@@ -279,12 +288,16 @@ func (r *Runner) run(runtimeView playbacksession.GenerationRuntime, request Star
 		}
 		_ = r.sessions.ResetGenerationAttempt(request.SessionID, request.GenerationID, backend)
 
-		attemptDeadline := deadline
+		// 每个后端尝试在 totalCap 内取独立预算：硬件=HardwareStartBudget，
+		// 软件=FirstSegmentTimeout。这样硬件失败回退后，软件仍获得完整首片预算，
+		// 而不是被单一绝对截止时间截断。
+		attemptBudget := r.cfg.FirstSegmentTimeout
 		if backend != ffmpeg.HWAccelNone {
-			hardwareDeadline := time.Now().Add(r.cfg.HardwareStartBudget)
-			if hardwareDeadline.Before(attemptDeadline) {
-				attemptDeadline = hardwareDeadline
-			}
+			attemptBudget = r.cfg.HardwareStartBudget
+		}
+		attemptDeadline := time.Now().Add(attemptBudget)
+		if totalCap.Before(attemptDeadline) {
+			attemptDeadline = totalCap
 		}
 		attemptCtx, cancelAttempt := context.WithCancel(runtimeView.Context)
 		watchCtx, cancelWatch := context.WithDeadline(runtimeView.Context, attemptDeadline)
@@ -354,7 +367,7 @@ func (r *Runner) run(runtimeView playbacksession.GenerationRuntime, request Star
 			}
 			break
 		}
-		canFallback := backend != ffmpeg.HWAccelNone && runtimeView.Context.Err() == nil && time.Now().Before(deadline)
+		canFallback := backend != ffmpeg.HWAccelNone && runtimeView.Context.Err() == nil && time.Now().Before(totalCap)
 		if canFallback {
 			r.logger.Warnw("playback hardware startup failed; falling back to software",
 				"session_id", request.SessionID,

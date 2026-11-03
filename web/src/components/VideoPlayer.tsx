@@ -56,6 +56,8 @@ interface VideoPlayerProps {
   autoEnabled?: boolean
   /** 选档回调（手动 + 自动控制器均经此上报给上层执行会话重启/重新规划） */
   onRequestQuality?: (presetId: string, source: 'manual' | 'auto') => void
+  /** 会话级 seek 回调（HLS 滚动窗口无法靠 currentTime 跳到窗口外，需重启会话） */
+  onSeek?: (timeSeconds: number) => void
 }
 
 const PLAYER_CONTROL_CLASS = 'flex h-9 min-w-9 items-center justify-center rounded-[var(--nv-player-radius-control)] text-[var(--nv-player-text-secondary)] transition-[background-color,color,transform] hover:bg-[var(--nv-player-surface-hover)] hover:text-[var(--nv-player-text-primary)] active:scale-[0.98]'
@@ -83,6 +85,7 @@ export default function VideoPlayer({
   activeQualityId = 'auto',
   autoEnabled = false,
   onRequestQuality,
+  onSeek,
 }: VideoPlayerProps) {
   const videoRef = useRef<HTMLVideoElement>(null)
   const hlsRef = useRef<Hls | null>(null)
@@ -172,6 +175,7 @@ export default function VideoPlayer({
     startVolume: number
     direction: 'none' | 'horizontal' | 'vertical'
     side: 'left' | 'right'
+    targetTime?: number
   } | null>(null)
   const gestureOverlayTimer = useRef<number>(0)
 
@@ -531,7 +535,8 @@ export default function VideoPlayer({
     }
   }, [qualityPresets, activeQualityId])
 
-  // 进入自动档：从原画起；退出自动档：停止 tick（控制器保留状态但不再决策）
+  // 进入自动档：从安全档位起（reset 内部解析 SAFE_START_RUNG_ID）；
+  // 退出自动档：停止 tick（控制器保留状态但不再决策）
   useEffect(() => {
     if (autoEnabled) {
       autoControllerRef.current?.reset(Date.now())
@@ -709,6 +714,11 @@ export default function VideoPlayer({
     const targetTime = ((event.clientX - rect.left) / rect.width) * displayDuration
     if (mode === 'remux' || mode === 'smart_remux') {
       remuxSeek(targetTime)
+      return
+    }
+    if (onSeek) {
+      // HLS 滚动窗口：窗口外的跳转需重启会话，不能只设 currentTime。
+      onSeek(targetTime)
       return
     }
     if (video.duration > 0 && targetTime <= video.duration) video.currentTime = targetTime
@@ -912,6 +922,7 @@ export default function VideoPlayer({
       const effectiveDuration = (knownDuration && knownDuration > 0 && knownDuration > duration) ? knownDuration : duration
       const seekDelta = (deltaX / rect.width) * effectiveDuration * 0.3
       const newTime = Math.max(0, Math.min(effectiveDuration, gesture.startTime + seekDelta))
+      gesture.targetTime = newTime
       const diff = newTime - gesture.startTime
       setGestureOverlay({
         type: 'seek',
@@ -932,16 +943,23 @@ export default function VideoPlayer({
     const gesture = gestureRef.current
     if (!gesture) return
     if (gesture.direction === 'horizontal') {
-      const video = videoRef.current
-      const rect = containerRef.current?.getBoundingClientRect()
-      if (video && rect) {
-        // Preserve existing behavior: gesture overlay previews the seek delta.
+      const target = gesture.targetTime
+      if (target !== undefined && Number.isFinite(target)) {
+        if (mode === 'remux' || mode === 'smart_remux') {
+          remuxSeek(target)
+        } else if (onSeek) {
+          // HLS 滚动窗口：窗口外的跳转需重启会话，不能只设 currentTime。
+          onSeek(target)
+        } else {
+          const video = videoRef.current
+          if (video && target <= (video.duration || target)) video.currentTime = target
+        }
       }
     }
     gestureRef.current = null
     clearTimeout(gestureOverlayTimer.current)
     gestureOverlayTimer.current = window.setTimeout(() => setGestureOverlay(null), 500)
-  }, [])
+  }, [mode, onSeek, remuxSeek])
 
   const closeAllMenus = () => {
     setShowQuality(false)

@@ -16,7 +16,7 @@
 #   - npm / Go 依赖与 Go 编译缓存走 BuildKit cache mount，重复构建显著加快。
 
 FROM --platform=$BUILDPLATFORM node:22-alpine AS frontend
-ARG NOWEN_VERSION=0.3.0
+ARG NOWEN_VERSION=0.5.0
 WORKDIR /app/web
 COPY web/package*.json ./
 RUN --mount=type=cache,target=/root/.npm npm ci
@@ -27,7 +27,7 @@ RUN npx vite build
 FROM --platform=$BUILDPLATFORM golang:1.27-alpine AS backend
 ARG TARGETOS
 ARG TARGETARCH
-ARG NOWEN_VERSION=0.3.0
+ARG NOWEN_VERSION=0.5.0
 WORKDIR /app
 ENV GOPROXY=https://goproxy.cn,https://goproxy.io,direct
 COPY go.mod go.sum ./
@@ -43,7 +43,7 @@ RUN --mount=type=cache,target=/go/pkg/mod \
 
 # ---- 运行时：只含本体，不含 ffmpeg / 硬件驱动 ----
 FROM alpine:3.24
-ARG NOWEN_VERSION=0.3.0
+ARG NOWEN_VERSION=0.5.0
 
 # 仅保留运行本体与入口脚本所需的最小依赖；不装 ffmpeg。
 RUN apk add --no-cache tzdata ca-certificates su-exec

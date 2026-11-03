@@ -170,6 +170,8 @@ func defaultQualityLadder() []Preset {
 		{Name: "1080p", DisplayName: "1080P", Width: 1920, Height: 1080, BitrateKbps: 2000, AudioKbps: 192, Fixed: false},
 		{Name: "720p", DisplayName: "720P", Width: 1280, Height: 720, BitrateKbps: 1000, AudioKbps: 128, Fixed: false},
 		{Name: "640p", DisplayName: "640P", Width: 640, Height: 360, BitrateKbps: 600, AudioKbps: 96, Fixed: false},
+		// 低码率兜底档：弱 CPU 软件转码/受限链路下保证可播（最低码率档）。
+		{Name: "480p", DisplayName: "480P", Width: 854, Height: 480, BitrateKbps: 400, AudioKbps: 96, Fixed: false},
 	}
 }
 

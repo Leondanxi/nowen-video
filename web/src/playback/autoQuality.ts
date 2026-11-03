@@ -5,9 +5,11 @@
  * 这样判定口径可独立单测、可在 VideoPlayer / SessionVideoPlayer 两边一致地接线。
  *
  * 阶梯（rungs）按 高→低 排序，index 0 固定为「原画(original)」：
- *   original → 4k → 2k → 1080p → 720p → 640p
- * 起始固定原画；卡顿立即降一档；带宽估算可靠时直接收敛到最高可用档；
- * 恢复后按迟滞（hysteresis）逐级升回，直至原画。
+ *   original → 4k → 2k → 1080p → 720p → 640p → 480p
+ * 起始固定为安全档位（SAFE_START_RUNG_ID，默认 1080p）而非原画，避免弱 CPU
+ * 软件转码/受限链路下从最重的原画起播导致首片超时与卡顿；卡顿立即降一档；
+ * 带宽估算可靠时直接收敛到最高可用档；恢复后按迟滞（hysteresis）逐级升回，
+ * 原画仅在带宽+缓冲+持续观察均满足时才经升档路径到达。
  */
 
 export interface AutoRung {
@@ -57,6 +59,12 @@ export type AutoQualityDecision =
 /** 原画档 id（固定内置行，不可删） */
 export const ORIGINAL_PRESET_ID = 'original'
 
+/**
+ * 自动档安全起始档位 id。与服务端 defaultProfile 的安全封顶（高分辨率→1080p）
+ * 对齐，保证首个会话在弱 CPU 上也能实时转码。该档缺失时回退到最低非原画档。
+ */
+export const SAFE_START_RUNG_ID = '1080p'
+
 export class AutoQualityController {
   private readonly config: AutoQualityConfig
   private rungs: AutoRung[] = []
@@ -79,15 +87,27 @@ export class AutoQualityController {
     this.config = { ...DEFAULT_AUTO_QUALITY_CONFIG, ...config }
   }
 
-  /** 设置阶梯（高→低，index0=原画）。会重置到原画并清空追踪状态。 */
+  /** 设置阶梯（高→低，index0=原画）。会重置到安全起始档并清空追踪状态。 */
   setRungs(rungs: AutoRung[]): void {
     this.rungs = [...rungs]
     this.reset()
   }
 
-  /** 回到原画起点，清空所有追踪状态。 */
+  /**
+   * 解析安全起始档索引：优先 SAFE_START_RUNG_ID；缺失时回退到最低非原画档
+   * （index 最后一个），都没有再回退 0。
+   */
+  private safeStartIndex(): number {
+    if (this.rungs.length === 0) return 0
+    const found = this.rungs.findIndex((r) => r.id === SAFE_START_RUNG_ID)
+    if (found >= 0) return found
+    // 跳过 index 0 的原画，取最低的非原画档。
+    return this.rungs.length > 1 ? this.rungs.length - 1 : 0
+  }
+
+  /** 回到安全起始档，清空所有追踪状态。 */
   reset(now = 0): void {
-    this.index = 0
+    this.index = this.safeStartIndex()
     this.lastSwitchAt = now
     this.stallSince = null
     this.lowBufferStrikes = 0
