@@ -21,7 +21,7 @@ import (
 )
 
 const (
-	defaultPlaybackHeartbeatInterval   = 15 * time.Second
+	defaultPlaybackHeartbeatInterval   = 5 * time.Second
 	defaultPlaybackStartupWait         = 3 * time.Second
 	defaultPlaybackHardwareStartBudget = 10 * time.Second
 	defaultPlaybackFirstSegmentTimeout = 24 * time.Second

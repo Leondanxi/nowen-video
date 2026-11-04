@@ -446,11 +446,17 @@ export default function VideoPlayer({
     } else if (Hls.isSupported()) {
       const hls = new Hls({
         enableWorker: true,
+        // 关闭自动起播，改由 MANIFEST_PARSED 显式从窗口最早处开始，避免贴直播边缘
+        autoStartLoad: false,
         startLevel: -1,
         capLevelToPlayerSize: true,
         maxBufferLength: 30,
         maxMaxBufferLength: 60,
         maxBufferSize: 60 * 1000 * 1000,
+        // 直播窗口：显式同步 3 个分片，放宽最大延迟，避免播放器主动 seek 追边而清空缓冲
+        liveSyncDurationCount: 3,
+        liveMaxLatencyDurationCount: 10,
+        backBufferLength: 60,
         abrBandWidthFactor: 0.95,
         abrBandWidthUpFactor: 0.7,
         testBandwidth: true,
@@ -462,6 +468,18 @@ export default function VideoPlayer({
       hls.loadSource(src)
       hls.attachMedia(video)
       hls.on(Hls.Events.MANIFEST_PARSED, () => {
+        // 从窗口最早分片（或指定起播点）开始加载，主动吃满可用缓冲而非贴边缘
+        let anchor = startPosition
+        try {
+          const details = hls.levels[0]?.details
+          const earliest = details?.fragments?.[0]?.start
+          if (earliest !== undefined && (!(anchor > 0) || anchor < earliest)) {
+            anchor = earliest
+          }
+        } catch {
+          /* 忽略，使用默认起播点 */
+        }
+        hls.startLoad(anchor > 0 ? anchor : 0)
         if (startPosition > 0) video.currentTime = startPosition
         video.play().catch(() => {})
       })
